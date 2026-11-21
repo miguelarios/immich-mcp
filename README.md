@@ -67,8 +67,9 @@ services:
 ### For a household (sign-in)
 
 With `IMMICH_MCP_AUTH=oauth` the server can face the internet: each person adds the URL to Claude
-(or any MCP client that does OAuth), pastes a read-only Immich API key of their own on the sign-in
-page, and from then on searches only what their Immich account can see.
+(or any MCP client that does OAuth), signs in with their Immich email and password on the sign-in
+page, and from then on searches only what their Immich account can see. (They can paste an API
+key of their own instead.)
 
 ```yaml
 services:
@@ -122,6 +123,7 @@ Other clients: `{"type": "http", "url": "http://127.0.0.1:3000/mcp"}`.
 | `IMMICH_MCP_PUBLIC_URL` | required with `oauth` | The origin clients use, no path; https unless loopback |
 | `IMMICH_MCP_SECRET` | required with `oauth` | 32+ characters; seals client ids and tokens. Changing it signs everyone out |
 | `IMMICH_MCP_OAUTH_REDIRECT_URIS` | none | Extra redirect URIs to admit, comma-separated |
+| `IMMICH_MCP_PASSWORD_SIGN_IN` | `true` | `false` removes the email-and-password form, leaving paste-a-key |
 
 ## Security
 
@@ -134,15 +136,22 @@ blocks DNS-rebinding attacks from web pages.
 (discovery, dynamic client registration, PKCE S256, tokens bound to this server), and `/mcp`
 answers only a valid token:
 
-- **It never sees an Immich password.** People sign in to Immich as usual (password or passkey),
-  create an API key there and paste it. A key that can do more than read is refused, as is one
-  missing `asset.read`, `asset.view`, `person.read` or `album.read`.
+- **A password is used once and never kept.** The sign-in page takes an Immich email and
+  password, signs in to Immich, creates a read-only API key named `Immich MCP (<app> · <id>)`,
+  signs out and drops the password. It is not stored, logged or put in a token. Signing in again
+  from the same app replaces that key; another app's key, or the same app on another computer,
+  is never touched. Five wrong passwords make an account wait 15 minutes on this page (not in
+  Immich). Anyone who knows an email can trigger that wait; pasting a key still works meanwhile.
+- **Or no password at all.** The page also accepts a pasted API key, and
+  `IMMICH_MCP_PASSWORD_SIGN_IN=false` leaves that as the only way in. A pasted key that can do
+  more than read is refused, as is one missing `asset.read`, `asset.view`, `person.read` or
+  `album.read`.
 - **Only known clients can connect.** Redirect URIs are limited to Claude's callbacks, loopback
   (desktop and CLI clients) and `IMMICH_MCP_OAUTH_REDIRECT_URIS`. Otherwise anyone could register
   a client and send a family member a link to the real sign-in page. Another hosted client is
   refused at registration with `invalid_redirect_uri` until its callback is added there.
-- **Tell the family: only paste a key into a page you opened yourself**, from your own app, just
-  now. A link to the sign-in page sent by someone else connects *their* app to your photos.
+- **Tell the family: only sign in on a page you opened yourself**, from your own app, just now.
+  A link to the sign-in page sent by someone else connects *their* app to your photos.
 - **Nothing is stored.** A token is the person's API key sealed with `IMMICH_MCP_SECRET`
   (AES-256-GCM), valid for one hour and refreshed for up to 90 days at a time; after a year the
   key is pasted again. Keep the secret out of the repository and make it random

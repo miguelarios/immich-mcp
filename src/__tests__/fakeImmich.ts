@@ -147,6 +147,20 @@ export interface FakeImmich {
   callsTo(method: string, path: string): Recorded[];
   /** What `GET /api-keys/me` reports per key; a key not listed here is rejected with 401. */
   apiKeys: Map<string, string[]>;
+  /** Accounts that can sign in with a password: email to password. */
+  users: Map<string, string>;
+  /** Keys created through `POST /api-keys`, newest last. */
+  createdKeys: Array<{
+    id: string;
+    name: string;
+    secret: string;
+    permissions: string[];
+    createdAt: string;
+  }>;
+  /** The instant `POST /api-keys` stamps on a new key; tests move it to age keys. */
+  clock: { now: string };
+  /** Session tokens that are signed in right now. */
+  sessions: Set<string>;
   /** Overrides the response for one endpoint. */
   respond(method: string, path: string, response: () => Response | Promise<Response>): void;
 }
@@ -174,6 +188,11 @@ export const READ_PERMISSIONS = ["asset.read", "asset.view", "person.read", "alb
 export function fakeImmich(): FakeImmich {
   const calls: Recorded[] = [];
   const apiKeys = new Map<string, string[]>([["k", READ_PERMISSIONS]]);
+  const users = new Map<string, string>();
+  const sessions = new Set<string>();
+  const createdKeys: FakeImmich["createdKeys"] = [];
+  let serial = 0;
+  const clock = { now: "2026-11-21T12:00:00.000Z" };
   const overrides = new Map<string, () => Response | Promise<Response>>();
 
   const route = (
@@ -183,6 +202,55 @@ export function fakeImmich(): FakeImmich {
     body: any,
     headers: Headers,
   ): Response => {
+    if (method === "POST" && path === "/api/auth/login") {
+      const email = typeof body?.email === "string" ? body.email : "";
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+        return json({ message: ["email must be an email"] }, 400);
+      }
+      // Immich stores and compares emails in lower case.
+      if (users.get(email.toLowerCase()) !== body.password) {
+        return json({ message: "Incorrect email or password" }, 401);
+      }
+      const accessToken = `session-${++serial}`;
+      sessions.add(accessToken);
+      return json({ accessToken, userId: "u1", userEmail: body.email }, 201);
+    }
+    const session = (headers.get("authorization") ?? "").replace(/^Bearer /, "");
+    if (method === "POST" && path === "/api/auth/logout") {
+      sessions.delete(session);
+      return json({ successful: true, redirectUri: "/auth/login" });
+    }
+    if (path === "/api/api-keys" || /^\/api\/api-keys\/[^/]+$/.test(path)) {
+      if (path !== "/api/api-keys/me" && !sessions.has(session)) {
+        return json({ message: "Authentication required" }, 401);
+      }
+    }
+    if (method === "GET" && path === "/api/api-keys") {
+      return json(createdKeys.map(({ secret: _secret, ...rest }) => rest));
+    }
+    if (method === "POST" && path === "/api/api-keys") {
+      if (!Array.isArray(body?.permissions) || body.permissions.length === 0) {
+        return json({ message: ["permissions must contain at least 1 elements"] }, 400);
+      }
+      const created = {
+        id: `key-${++serial}`,
+        name: body.name,
+        permissions: body.permissions,
+        secret: `created-secret-${serial}-0000000000`,
+        createdAt: clock.now,
+      };
+      createdKeys.push(created);
+      apiKeys.set(created.secret, created.permissions);
+      const { secret, ...apiKey } = created;
+      return json({ ...apiKey, secret, apiKey }, 201);
+    }
+    const keyId = /^\/api\/api-keys\/([^/]+)$/.exec(path);
+    if (method === "DELETE" && keyId && keyId[1] !== "me") {
+      const at = createdKeys.findIndex((key) => key.id === keyId[1]);
+      if (at < 0) return json({ message: "API Key not found" }, 400);
+      apiKeys.delete(createdKeys.splice(at, 1)[0].secret);
+      return new Response(null, { status: 204 });
+    }
     if (method === "GET" && path === "/api/api-keys/me") {
       const permissions = apiKeys.get(headers.get("x-api-key") ?? "");
       if (!permissions) return json({ message: "Invalid API key" }, 401);
@@ -259,6 +327,10 @@ export function fakeImmich(): FakeImmich {
     fetch,
     calls,
     apiKeys,
+    users,
+    createdKeys,
+    sessions,
+    clock,
     callsTo: (method, path) => calls.filter((c) => c.method === method && c.path === path),
     respond: (method, path, response) => overrides.set(`${method} ${path}`, response),
   };

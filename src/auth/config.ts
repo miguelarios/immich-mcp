@@ -7,6 +7,8 @@ export interface AuthConfig {
   secret: string;
   /** Redirect URIs admitted besides the Claude callbacks and loopback. */
   redirectUris: string[];
+  /** Offer email-and-password sign-in. Off leaves pasting an API key as the only way in. */
+  passwordSignIn: boolean;
 }
 
 type Env = Record<string, string | undefined>;
@@ -25,6 +27,7 @@ export function isLoopbackHost(hostname: string): boolean {
  * - `IMMICH_MCP_PUBLIC_URL` — the origin clients use; https unless loopback
  * - `IMMICH_MCP_SECRET` — at least 32 characters, e.g. `openssl rand -base64 48`
  * - `IMMICH_MCP_OAUTH_REDIRECT_URIS` — comma-separated extra redirect URIs
+ * - `IMMICH_MCP_PASSWORD_SIGN_IN` — `true` (default) or `false`; off, people can only paste a key
  *
  * Returns `undefined` when sign-in is off.
  */
@@ -91,5 +94,17 @@ export function loadAuthConfig(env: Env = process.env): AuthConfig | undefined {
     }
   }
 
-  return { publicUrl: url.origin, secret: secret as string, redirectUris };
+  const rawPassword = (env.IMMICH_MCP_PASSWORD_SIGN_IN || "true").trim().toLowerCase();
+  if (rawPassword !== "true" && rawPassword !== "false") {
+    throw new ConfigurationError(
+      `IMMICH_MCP_PASSWORD_SIGN_IN must be "true" or "false", got "${env.IMMICH_MCP_PASSWORD_SIGN_IN}"`,
+    );
+  }
+
+  return {
+    publicUrl: url.origin,
+    secret: secret as string,
+    redirectUris,
+    passwordSignIn: rawPassword === "true",
+  };
 }

@@ -22,20 +22,23 @@ const SECRET = "0123456789abcdefghijklmnopqrstuvwxyzABCD";
 const CLAUDE = "https://claude.ai/api/mcp/auth_callback";
 const ADA_KEY = "ada-key-0000000000000000";
 const JOSE_KEY = "jose-key-000000000000000";
+const ADA_EMAIL = "ada@example.test";
+const ADA_PASSWORD = "correct horse battery staple";
 
 const closers: Array<() => Promise<void>> = [];
 afterEach(async () => {
   await Promise.all(closers.splice(0).map((close) => close()));
 });
 
-function setup() {
+function setup({ passwordSignIn = true } = {}) {
   const fake = fakeImmich();
+  fake.users.set(ADA_EMAIL, ADA_PASSWORD);
   fake.apiKeys.set(ADA_KEY, READ_PERMISSIONS);
   fake.apiKeys.set(JOSE_KEY, [...READ_PERMISSIONS, "album.statistics"]);
   // Starts at the real time: the SDK checks token expiry against the real clock.
   const clock = { ms: Date.now() };
   const oauth = createOAuthServer({
-    config: { publicUrl: PUBLIC, secret: SECRET, redirectUris: [] },
+    config: { publicUrl: PUBLIC, secret: SECRET, redirectUris: [], passwordSignIn },
     immich: { baseUrl: BASE, publicUrl: BASE, timeoutMs: 30_000 },
     fetch: fake.fetch,
     now: () => clock.ms,
@@ -378,6 +381,294 @@ describe("the sign-in page", () => {
   });
 });
 
+describe("signing in with an Immich email and password", () => {
+  const verifier = "v".repeat(43);
+  const challenge = createHash("sha256").update(verifier).digest("base64url");
+
+  /** Opens the page for a fresh client and posts the password form. */
+  const submit = async (
+    ctx: ReturnType<typeof setup>,
+    fields: { email?: string; password?: string },
+    clientName = "Claude",
+  ) => {
+    const { body } = await ctx.register([CLAUDE], clientName);
+    const { request } = await ctx.openSignIn(body.client_id, challenge);
+    const response = await ctx.postForm("/authorize", {
+      request,
+      method: "password",
+      email: fields.email ?? ADA_EMAIL,
+      password: fields.password ?? ADA_PASSWORD,
+    });
+    return { response, clientId: body.client_id as string };
+  };
+
+  it("offers the form, and the key form only as the alternative", async () => {
+    const { register, openSignIn } = setup();
+    const { body } = await register();
+    const { html } = await openSignIn(body.client_id, challenge);
+    expect(html).toContain('name="password"');
+    expect(html).toContain('autocomplete="current-password"');
+    expect(html).toContain("<summary>Use an API key instead</summary>");
+    expect(html).toContain("It is\nnot stored");
+  });
+
+  it("creates a read-only key, signs out of Immich, and connects with that key", async () => {
+    const ctx = setup();
+    const { response, clientId } = await submit(ctx, {});
+    expect(response.status).toBe(303);
+
+    expect(ctx.fake.createdKeys).toHaveLength(1);
+    expect(ctx.fake.createdKeys[0].name).toMatch(/^Immich MCP \(Claude · [\w-]{6}\)$/);
+    expect(ctx.fake.createdKeys[0].permissions).toEqual(READ_PERMISSIONS);
+    // The session opened with the password is closed again.
+    expect(ctx.fake.sessions.size).toBe(0);
+    expect(ctx.fake.callsTo("POST", "/api/auth/logout")).toHaveLength(1);
+
+    const code = new URL(response.headers.get("location") ?? "").searchParams.get("code") ?? "";
+    const exchanged = await ctx.postForm("/token", {
+      grant_type: "authorization_code",
+      code,
+      code_verifier: verifier,
+      client_id: clientId,
+    });
+    const tokens = (await exchanged.json()) as Record<string, any>;
+    expect(exchanged.status).toBe(200);
+    // Neither the password nor the key is readable in what the client holds.
+    expect(JSON.stringify(tokens)).not.toContain(ADA_PASSWORD);
+    expect(JSON.stringify(tokens)).not.toContain(ctx.fake.createdKeys[0].secret);
+
+    const used = await ctx.postJson("/mcp", INITIALIZE, {
+      ...MCP_HEADERS,
+      authorization: `Bearer ${tokens.access_token}`,
+    });
+    expect(used.status).toBe(200);
+  });
+
+  it("sends the password to Immich's login and nowhere else", async () => {
+    const ctx = setup();
+    await submit(ctx, {});
+    const carrying = ctx.fake.calls.filter((call) =>
+      JSON.stringify(call.body ?? "").includes(ADA_PASSWORD),
+    );
+    expect(carrying.map((call) => `${call.method} ${call.path}`)).toEqual(["POST /api/auth/login"]);
+  });
+
+  /** Signs in again through an existing registration, as a client reconnecting does. */
+  const signInAgain = async (ctx: ReturnType<typeof setup>, clientId: string) => {
+    const { request } = await ctx.openSignIn(clientId, challenge);
+    const response = await ctx.postForm("/authorize", {
+      request,
+      method: "password",
+      email: ADA_EMAIL,
+      password: ADA_PASSWORD,
+    });
+    const code = new URL(response.headers.get("location") ?? "").searchParams.get("code") ?? "";
+    const exchanged = await ctx.postForm("/token", {
+      grant_type: "authorization_code",
+      code,
+      code_verifier: verifier,
+      client_id: clientId,
+    });
+    return (await exchanged.json()) as Record<string, any>;
+  };
+  const refresh = (ctx: ReturnType<typeof setup>, clientId: string, token: string) =>
+    ctx.postForm("/token", {
+      grant_type: "refresh_token",
+      refresh_token: token,
+      client_id: clientId,
+    });
+
+  it("replaces the key when the same registration signs in again", async () => {
+    const ctx = setup();
+    const { body } = await ctx.register([CLAUDE], "Claude");
+    const first = await signInAgain(ctx, body.client_id);
+    const firstSecret = ctx.fake.createdKeys[0].secret;
+    const second = await signInAgain(ctx, body.client_id);
+
+    expect(ctx.fake.createdKeys).toHaveLength(1);
+    expect(ctx.fake.apiKeys.has(firstSecret)).toBe(false);
+    expect((await refresh(ctx, body.client_id, second.refresh_token)).status).toBe(200);
+    expect((await refresh(ctx, body.client_id, first.refresh_token)).status).toBe(400);
+  });
+
+  it("never removes another registration's key, whatever it calls itself", async () => {
+    const ctx = setup();
+    const mine = (await ctx.register([CLAUDE], "Claude")).body.client_id;
+    const tokens = await signInAgain(ctx, mine);
+    // The same app on another computer, and a stranger's client borrowing the name.
+    for (const name of ["Claude", "Claude!!", "Another App"]) {
+      await signInAgain(ctx, (await ctx.register([CLAUDE], name)).body.client_id);
+    }
+    expect(ctx.fake.createdKeys).toHaveLength(4);
+    expect((await refresh(ctx, mine, tokens.refresh_token)).status).toBe(200);
+  });
+
+  it("keeps the working connection when the new key cannot be created", async () => {
+    const ctx = setup();
+    const { body } = await ctx.register([CLAUDE], "Claude");
+    const tokens = await signInAgain(ctx, body.client_id);
+
+    ctx.fake.respond("POST", "/api/api-keys", () => new Response("boom", { status: 500 }));
+    const { request } = await ctx.openSignIn(body.client_id, challenge);
+    const failed = await ctx.postForm("/authorize", {
+      request,
+      method: "password",
+      email: ADA_EMAIL,
+      password: ADA_PASSWORD,
+    });
+    expect(failed.status).toBe(502);
+    expect(ctx.fake.callsTo("DELETE", `/api/api-keys/${ctx.fake.createdKeys[0].id}`)).toHaveLength(
+      0,
+    );
+    expect((await refresh(ctx, body.client_id, tokens.refresh_token)).status).toBe(200);
+  });
+
+  it("clears out this app's keys that are older than any sign-in can last", async () => {
+    const ctx = setup();
+    ctx.fake.clock.now = new Date(ctx.clock.ms - 400 * 24 * 3600_000).toISOString();
+    await signInAgain(ctx, (await ctx.register([CLAUDE], "Claude")).body.client_id);
+    await signInAgain(ctx, (await ctx.register([CLAUDE], "Another App")).body.client_id);
+    ctx.fake.clock.now = new Date(ctx.clock.ms).toISOString();
+    await signInAgain(ctx, (await ctx.register([CLAUDE], "Claude")).body.client_id);
+
+    // The year-old "Claude" key is gone; the other app's old key is not this app's to remove.
+    expect(ctx.fake.createdKeys.map((key) => key.name.replace(/ · .*/, ""))).toEqual([
+      "Immich MCP (Another App",
+      "Immich MCP (Claude",
+    ]);
+  });
+
+  it("keeps the form open on a wrong password, with the email and never the password", async () => {
+    const ctx = setup();
+    const { response } = await submit(ctx, { password: "wrong password" });
+    expect(response.status).toBe(400);
+    expect(response.headers.get("location")).toBeNull();
+    const html = await response.text();
+    expect(html).toContain("Incorrect email or password.");
+    expect(html).toContain(`value="${ADA_EMAIL}"`);
+    expect(html).not.toContain("wrong password");
+    expect(ctx.fake.createdKeys).toHaveLength(0);
+  });
+
+  it("counts simultaneous guesses before Immich answers, so a burst cannot outrun the limit", async () => {
+    const ctx = setup();
+    const { body } = await ctx.register();
+    const { request } = await ctx.openSignIn(body.client_id, challenge);
+    // Twenty at once, each from its own address so only the account limit applies.
+    const statuses = await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        ctx.oauth
+          .routes(
+            new Request(`${PUBLIC}/authorize`, {
+              method: "POST",
+              headers: {
+                "content-type": "application/x-www-form-urlencoded",
+                "x-forwarded-for": `198.51.100.${i}`,
+              },
+              body: new URLSearchParams({
+                request,
+                method: "password",
+                email: ADA_EMAIL,
+                password: `guess-${i}`,
+              }).toString(),
+            }),
+          )
+          .then((response) => response?.status),
+      ),
+    );
+    expect(ctx.fake.callsTo("POST", "/api/auth/login")).toHaveLength(5);
+    expect(statuses.filter((status) => status === 429)).toHaveLength(15);
+  });
+
+  it("does not hold an address Immich will not consider an email against the account", async () => {
+    const ctx = setup();
+    for (let i = 0; i < 6; i++) {
+      const { response } = await submit(ctx, { email: "ada@localhost" });
+      expect(response.status).toBe(400);
+      expect(await response.text()).toContain("did not accept that email address");
+    }
+    expect((await submit(ctx, {})).response.status).toBe(303);
+  });
+
+  it("tells Immich who is signing in, and signs in whatever the email's case", async () => {
+    const ctx = setup();
+    const { body } = await ctx.register();
+    const { request } = await ctx.openSignIn(body.client_id, challenge);
+    const response = await ctx.oauth.routes(
+      new Request(`${PUBLIC}/authorize`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          "x-forwarded-for": "203.0.113.5, 198.51.100.77",
+        },
+        body: new URLSearchParams({
+          request,
+          method: "password",
+          email: "Ada@Example.test",
+          password: ADA_PASSWORD,
+        }).toString(),
+      }),
+    );
+    expect(response?.status).toBe(303);
+    const login = ctx.fake.callsTo("POST", "/api/auth/login")[0];
+    expect(login.headers.get("x-forwarded-for")).toBe("198.51.100.77");
+  });
+
+  it("makes an account wait after five wrong passwords, without calling Immich again", async () => {
+    const ctx = setup();
+    for (let i = 0; i < 5; i++) {
+      // Different addresses, so the per-address budget is not what stops it.
+      const { body } = await ctx.register();
+      const { request } = await ctx.openSignIn(body.client_id, challenge);
+      const response = await ctx.oauth.routes(
+        new Request(`${PUBLIC}/authorize`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/x-www-form-urlencoded",
+            "x-forwarded-for": `198.51.100.${i}`,
+          },
+          body: new URLSearchParams({
+            request,
+            method: "password",
+            email: "Ada@Example.test",
+            password: "guess",
+          }).toString(),
+        }),
+      );
+      expect(response?.status).toBe(400);
+    }
+    const logins = ctx.fake.callsTo("POST", "/api/auth/login").length;
+    const { response } = await submit(ctx, {});
+    expect(response.status).toBe(429);
+    expect(await response.text()).toContain("Wait 15 minutes");
+    expect(ctx.fake.callsTo("POST", "/api/auth/login")).toHaveLength(logins);
+
+    ctx.clock.ms += 16 * 60_000;
+    expect((await submit(ctx, {})).response.status).toBe(303);
+  });
+
+  it("signs out of Immich even when the key cannot be created", async () => {
+    const ctx = setup();
+    ctx.fake.respond("POST", "/api/api-keys", () => new Response("boom", { status: 500 }));
+    const { response } = await submit(ctx, {});
+    expect(response.status).toBe(502);
+    expect(ctx.fake.callsTo("POST", "/api/auth/logout")).toHaveLength(1);
+  });
+
+  it("can be turned off, leaving only the key form", async () => {
+    const ctx = setup({ passwordSignIn: false });
+    const { body } = await ctx.register();
+    const { html } = await ctx.openSignIn(body.client_id, challenge);
+    expect(html).not.toContain('name="password"');
+    expect(html).toContain('name="api_key"');
+
+    const { response } = await submit(ctx, {});
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain("turned off");
+    expect(ctx.fake.callsTo("POST", "/api/auth/login")).toHaveLength(0);
+  });
+});
+
 describe("tokens", () => {
   it("exchanges the code once, with the right verifier, for tokens that hide the key", async () => {
     const { signIn, postForm } = setup();
@@ -622,7 +913,11 @@ describe("loadAuthConfig", () => {
       publicUrl: "https://photos-mcp.example.test",
       secret: SECRET,
       redirectUris: ["https://agent.example.test/callback"],
+      passwordSignIn: true,
     });
+    expect(loadAuthConfig({ ...oauth, IMMICH_MCP_PASSWORD_SIGN_IN: "false" })?.passwordSignIn).toBe(
+      false,
+    );
   });
 
   it.each([
@@ -635,6 +930,7 @@ describe("loadAuthConfig", () => {
     [{ ...oauth, IMMICH_MCP_PUBLIC_URL: "https://example.test/mcp" }, "without a path"],
     [{ ...oauth, IMMICH_API_KEY: "k" }, "Unset IMMICH_API_KEY"],
     [{ ...oauth, IMMICH_MCP_OAUTH_REDIRECT_URIS: "not a uri" }, "invalid URI"],
+    [{ ...oauth, IMMICH_MCP_PASSWORD_SIGN_IN: "maybe" }, 'must be "true" or "false"'],
   ])("rejects %o", (env, message) => {
     expect(() => loadAuthConfig(env)).toThrow(ConfigurationError);
     expect(() => loadAuthConfig(env)).toThrow(message);
