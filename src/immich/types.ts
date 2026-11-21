@@ -178,3 +178,10 @@ export interface MetadataSearchRequest {
   withExif?: boolean;
   withPeople?: boolean;
 }
+
+/** `GET /api-keys/me`. `permissions` holds Immich permission names, or `all`. */
+export interface ApiKeyInfo {
+  id: string;
+  name: string;
+  permissions: string[];
+}

@@ -3,7 +3,8 @@ import { ConfigurationError } from "./errors.js";
 export interface ImmichConfig {
   /** Server origin the API is called on, without a trailing slash or `/api`. */
   baseUrl: string;
-  apiKey: string;
+  /** The one key every call uses. Absent with `IMMICH_MCP_AUTH=oauth`, where each caller brings one. */
+  apiKey?: string;
   /** Origin used for the links handed back to the user (`<publicUrl>/photos/<id>`). */
   publicUrl: string;
   /** IANA zone that bare dates (`2024-06-01`) are read in. */
@@ -42,15 +43,22 @@ function isValidTimeZone(zone: string): boolean {
  * Reads the server configuration from the environment.
  *
  * - `IMMICH_URL` (required) — e.g. `https://photos.example.com`; a trailing `/api` is accepted
- * - `IMMICH_API_KEY` (required) — needs at least `asset.read`, `person.read`, `album.read`
+ * - `IMMICH_API_KEY` (required unless `requireApiKey` is false) — needs at least `asset.read`,
+ *   `asset.view`, `person.read`, `album.read`
  * - `IMMICH_PUBLIC_URL` — origin for links returned to the user; defaults to `IMMICH_URL`
  * - `TZ` — zone that bare dates are read in; defaults to UTC
  * - `IMMICH_TIMEOUT_MS` — per-request timeout, default 30000
  */
-export function loadConfig(env: Env = process.env): ImmichConfig {
+export function loadConfig(
+  env: Env = process.env,
+  options: { requireApiKey?: boolean } = {},
+): ImmichConfig {
+  const requireApiKey = options.requireApiKey ?? true;
   const rawUrl = env.IMMICH_URL?.trim();
   const apiKey = env.IMMICH_API_KEY?.trim();
-  const missing = [!rawUrl && "IMMICH_URL", !apiKey && "IMMICH_API_KEY"].filter(Boolean);
+  const missing = [!rawUrl && "IMMICH_URL", requireApiKey && !apiKey && "IMMICH_API_KEY"].filter(
+    Boolean,
+  );
   if (missing.length > 0) {
     throw new ConfigurationError(`Missing required environment: ${missing.join(", ")}`);
   }
@@ -73,5 +81,11 @@ export function loadConfig(env: Env = process.env): ImmichConfig {
     throw new ConfigurationError(`IMMICH_TIMEOUT_MS must be a number of milliseconds >= 1000`);
   }
 
-  return { baseUrl, apiKey: apiKey as string, publicUrl, timeZone, timeoutMs };
+  return {
+    baseUrl,
+    ...(requireApiKey ? { apiKey: apiKey as string } : {}),
+    publicUrl,
+    timeZone,
+    timeoutMs,
+  };
 }

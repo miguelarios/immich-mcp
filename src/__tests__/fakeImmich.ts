@@ -145,6 +145,8 @@ export interface FakeImmich {
   calls: Recorded[];
   /** Calls to one endpoint, matched on method and path without the query string. */
   callsTo(method: string, path: string): Recorded[];
+  /** What `GET /api-keys/me` reports per key; a key not listed here is rejected with 401. */
+  apiKeys: Map<string, string[]>;
   /** Overrides the response for one endpoint. */
   respond(method: string, path: string, response: () => Response | Promise<Response>): void;
 }
@@ -167,11 +169,25 @@ function page(items: Asset[], extra: Record<string, unknown> = {}) {
   };
 }
 
+export const READ_PERMISSIONS = ["asset.read", "asset.view", "person.read", "album.read"];
+
 export function fakeImmich(): FakeImmich {
   const calls: Recorded[] = [];
+  const apiKeys = new Map<string, string[]>([["k", READ_PERMISSIONS]]);
   const overrides = new Map<string, () => Response | Promise<Response>>();
 
-  const route = (method: string, path: string, search: URLSearchParams, body: any): Response => {
+  const route = (
+    method: string,
+    path: string,
+    search: URLSearchParams,
+    body: any,
+    headers: Headers,
+  ): Response => {
+    if (method === "GET" && path === "/api/api-keys/me") {
+      const permissions = apiKeys.get(headers.get("x-api-key") ?? "");
+      if (!permissions) return json({ message: "Invalid API key" }, 401);
+      return json({ id: "12121212-1212-4121-8121-121212121212", name: "Claude", permissions });
+    }
     if (method === "POST" && path === "/api/search/smart") {
       return json(page([ASSETS[IDS.beach], ASSETS[IDS.video]]));
     }
@@ -236,12 +252,13 @@ export function fakeImmich(): FakeImmich {
     });
     const override = overrides.get(`${method} ${url.pathname}`);
     if (override) return override();
-    return route(method, url.pathname, url.searchParams, body);
+    return route(method, url.pathname, url.searchParams, body, new Headers(init?.headers));
   }) as typeof globalThis.fetch;
 
   return {
     fetch,
     calls,
+    apiKeys,
     callsTo: (method, path) => calls.filter((c) => c.method === method && c.path === path),
     respond: (method, path, response) => overrides.set(`${method} ${path}`, response),
   };

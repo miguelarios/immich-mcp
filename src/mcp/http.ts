@@ -3,6 +3,7 @@ import { type IncomingMessage, type ServerResponse, createServer } from "node:ht
 import type { AddressInfo } from "node:net";
 import { Readable } from "node:stream";
 import {
+  type AuthInfo,
   type McpServerFactory,
   WebStandardStreamableHTTPServerTransport,
   createMcpHandler,
@@ -33,8 +34,10 @@ import { ConfigurationError } from "../errors.js";
  *   today, but the sessionful shape is kept so the transport stays identical
  *   to the upstream one and any future elicitation works.
  *
- * No authentication is performed here. Exposed beyond loopback, this endpoint
- * belongs behind an OAuth proxy.
+ * Authentication is the caller's to supply (`HttpHandlerOptions.auth`, not in
+ * the upstream copy yet): its routes are served next to `/mcp`, and every
+ * `/mcp` request must pass its check. Without it nothing is authenticated,
+ * and exposed beyond loopback the endpoint belongs behind an OAuth proxy.
  */
 
 /** Where the MCP endpoint is served. */
@@ -42,6 +45,9 @@ export const MCP_HTTP_PATH = "/mcp";
 
 /** Liveness probe for container health checks. Touches no upstream service. */
 export const HEALTH_PATH = "/healthz";
+
+/** With sign-in on, one caller holds at most this many 2025-era sessions; the oldest is closed. */
+const MAX_SESSIONS_PER_CALLER = 20;
 
 /** A 2025-era session idle this long is closed; the client re-initializes. */
 const DEFAULT_SESSION_IDLE_MS = 30 * 60_000;
@@ -92,8 +98,21 @@ export function loadTransportConfig(
   };
 }
 
+/** Sign-in in front of `/mcp`, e.g. an OAuth authorization server. */
+export interface HttpAuth {
+  /** Serves the sign-in routes (discovery, token…); `undefined` for a path that is not one. */
+  routes(request: Request): Promise<Response | undefined>;
+  /**
+   * The verified caller of an `/mcp` request, or the response refusing it.
+   * `extra.sub` names the caller; a 2025-era session only answers the caller that opened it.
+   */
+  authenticate(request: Request): Promise<AuthInfo | Response>;
+}
+
 export interface HttpHandlerOptions {
   allowedOrigins?: string[];
+  /** When set, `/mcp` only answers requests that pass `auth.authenticate`. */
+  auth?: HttpAuth;
   onerror?: (error: Error) => void;
   /** Close a 2025-era session after this long without a request. */
   sessionIdleMs?: number;
@@ -110,6 +129,13 @@ export interface McpHttpHandler {
 interface LegacySession {
   transport: WebStandardStreamableHTTPServerTransport;
   lastSeen: number;
+  /** Who opened the session; empty without authentication. */
+  owner: string;
+}
+
+function callerOf(authInfo: AuthInfo | undefined): string {
+  const sub = authInfo?.extra?.sub;
+  return typeof sub === "string" ? sub : "";
 }
 
 function jsonRpcError(status: number, code: number, message: string): Response {
@@ -145,19 +171,25 @@ export function createHttpHandler(
   );
   sweep.unref();
 
-  const openLegacySession = async (request: Request): Promise<Response> => {
+  const openLegacySession = async (request: Request, authInfo?: AuthInfo): Promise<Response> => {
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (id) => {
-        sessions.set(id, { transport, lastSeen: Date.now() });
+        const owner = callerOf(authInfo);
+        if (options.auth) {
+          // A Map iterates in insertion order, so the first match is the oldest.
+          const mine = [...sessions].filter(([, session]) => session.owner === owner);
+          if (mine.length >= MAX_SESSIONS_PER_CALLER) closeSession(mine[0][0]);
+        }
+        sessions.set(id, { transport, lastSeen: Date.now(), owner });
       },
     });
     transport.onclose = () => {
       if (transport.sessionId) sessions.delete(transport.sessionId);
     };
-    const product = await factory({ era: "legacy", requestInfo: request });
+    const product = await factory({ era: "legacy", requestInfo: request, authInfo });
     await product.connect(transport);
-    return transport.handleRequest(request);
+    return transport.handleRequest(request, { authInfo });
   };
 
   const fetch = async (request: Request): Promise<Response> => {
@@ -167,7 +199,13 @@ export function createHttpHandler(
       return new Response("ok", { status: 200 });
     }
     if (url.pathname !== MCP_HTTP_PATH) {
-      return new Response("Not Found", { status: 404 });
+      try {
+        const response = await options.auth?.routes(request);
+        return response ?? new Response("Not Found", { status: 404 });
+      } catch (error) {
+        report(error as Error);
+        return new Response("Internal server error", { status: 500 });
+      }
     }
 
     // The spec requires validating Origin against DNS rebinding: a browser page
@@ -178,22 +216,32 @@ export function createHttpHandler(
     }
 
     try {
+      let authInfo: AuthInfo | undefined;
+      if (options.auth) {
+        const verdict = await options.auth.authenticate(request);
+        if (verdict instanceof Response) return verdict;
+        authInfo = verdict;
+      }
+
       const sessionId = request.headers.get("mcp-session-id");
       if (sessionId !== null) {
         const session = sessions.get(sessionId);
-        if (!session) return jsonRpcError(404, -32001, "Session not found.");
+        // Someone else's session id is as good as an unknown one.
+        if (!session || session.owner !== callerOf(authInfo)) {
+          return jsonRpcError(404, -32001, "Session not found.");
+        }
         session.lastSeen = Date.now();
-        return await session.transport.handleRequest(request);
+        return await session.transport.handleRequest(request, { authInfo });
       }
 
-      if (!(await isLegacyRequest(request))) return await modern.fetch(request);
+      if (!(await isLegacyRequest(request))) return await modern.fetch(request, { authInfo });
 
       if (request.method === "POST") {
         const body = await request
           .clone()
           .json()
           .catch(() => undefined);
-        if (isInitializeRequest(body)) return await openLegacySession(request);
+        if (isInitializeRequest(body)) return await openLegacySession(request, authInfo);
       }
       return jsonRpcError(400, -32000, "Bad Request: no valid session ID provided.");
     } catch (error) {
@@ -319,7 +367,7 @@ const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
  */
 export async function serve(
   factory: McpServerFactory,
-  options: { name: string; env?: Record<string, string | undefined> },
+  options: { name: string; env?: Record<string, string | undefined>; auth?: HttpAuth },
 ): Promise<{ close: () => Promise<void> }> {
   const { name } = options;
   const config = loadTransportConfig(options.env);
@@ -331,9 +379,9 @@ export async function serve(
     return handle;
   }
 
-  const handle = await serveHttp(factory, { ...config, onerror });
+  const handle = await serveHttp(factory, { ...config, onerror, auth: options.auth });
   console.error(`[${name}] Server started on ${handle.url.href}`);
-  if (!LOOPBACK.has(config.host)) {
+  if (!options.auth && !LOOPBACK.has(config.host)) {
     console.error(
       `[${name}] Listening beyond loopback with no authentication — put an OAuth proxy in front of it.`,
     );
