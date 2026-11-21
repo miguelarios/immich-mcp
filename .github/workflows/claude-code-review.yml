@@ -1,0 +1,110 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    # One review per PR, when it is opened or leaves draft. NOT on every push:
+    # a re-review after each fix-up round reads the whole diff again and always
+    # finds something new to say, which turns a PR into a loop of fix,
+    # re-review, fix — and burns quota for no added signal.
+    # Ask for another pass with @claude (claude.yml).
+    #
+    # `edited` is here only to catch a retarget. A PR opened against another
+    # feature branch is filtered out by `branches` below, and retargeting it to
+    # main fires `edited` rather than `opened` — so without this a stacked PR
+    # was never reviewed at all, which is not what the note below intended.
+    types: [opened, ready_for_review, edited]
+    # Stacked PRs are reviewed once retargeted to main, not while they sit on
+    # another feature branch where every base push re-triggers.
+    branches: [main]
+
+jobs:
+  claude-review:
+    # `edited` also fires on every title and body edit, which would reinstate
+    # the re-review loop the note above rules out. `changes.base` is present
+    # only when the base branch itself changed, so it is what separates a
+    # retarget from someone fixing a typo in the description.
+    if: github.event.action != 'edited' || github.event.changes.base != null
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      id-token: write
+
+    steps:
+      - name: Token configured?
+        id: token
+        env:
+          TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then echo "ok=true" >> "$GITHUB_OUTPUT"; else
+            echo "::notice::CLAUDE_CODE_OAUTH_TOKEN is not set on this repo; skipping."
+            echo "ok=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Checkout repository
+        if: steps.token.outputs.ok == 'true'
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code Review
+        if: steps.token.outputs.ok == 'true'
+        id: claude-review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review this pull request for bugs, data loss, security problems, and
+            missing tests for the behaviour it changes. Read the PR description
+            and anything it links first; they record decisions and rejected
+            alternatives, so do not re-raise what they already answer.
+
+            Post only what you have verified against the code on this PR's
+            current head. Do not repeat a point an earlier comment already made.
+
+            Format the comment exactly as Markdown using this template. Keep every
+            bullet to one sentence and omit only empty findings sections. Do not
+            collapse the review into prose paragraphs.
+
+            ## Code review
+
+            **Verdict:** Choose exactly one: `✅ Clear to merge`,
+            `⚠️ Verify before merge`, or `❌ Changes requested`.
+
+            ### Blocking
+            Include only findings that should stop a merge. Each bullet must name
+            a concrete failure scenario and link the file and line. Omit this
+            section when there are none.
+
+            ### Verify before merge
+            Include at most two bullets, and only when they change what the author
+            should actually do. A claim in the PR that is not backed by pasted
+            evidence belongs here. Omit this section when there are none.
+
+            ### Test status
+            State in one bullet what you executed. If you could not run the tests,
+            say so plainly and name the CI check that must provide the evidence.
+
+            ### What's solid
+            Write exactly one short bullet about the strongest part of the change.
+
+            Never include a `Minor` section. Skip style, naming, wording, optional
+            refactors, and "could be tightened" observations; the repository's
+            linter and conventions cover those.
+
+            Even when the verdict is `✅ Clear to merge`, use the full template.
+            The complete comment must be no more than 12 non-blank lines.
+
+            Use the repository's CLAUDE.md for conventions.
+
+            Use `gh pr comment` with your Bash tool to leave your review as a
+            comment on the PR.
+
+          # Review frequency is controlled by the GitHub triggers above, not by
+          # Claude's internal agent/tool loop.
+          claude_args: >-
+            --model claude-fable-5-1
+            --allowed-tools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)"
