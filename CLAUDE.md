@@ -31,7 +31,8 @@ Run all four before pushing.
   (github.com/miguelarios/pim-agents) with the env vars renamed to `IMMICH_MCP_*`. Keep it in step
   with upstream rather than letting the two drift; the `auth` option is the one addition here.
 - `src/auth/` — opt-in sign-in (`IMMICH_MCP_AUTH=oauth`): `oauth.ts` is the OAuth 2.1 authorization
-  server (discovery, registration, the paste-a-key page, tokens) and the bearer check for `/mcp`;
+  server (discovery, registration, the sign-in page, tokens) and the bearer check for `/mcp`;
+  `immichLogin.ts` turns an email and password into a read-only key and signs out again;
   `seal.ts` encrypts client ids and tokens, so nothing is stored; `libraries.ts` keeps one
   `PhotoLibrary` per API key. The SDK only ships the resource-server half, hence the hand-written
   authorization server.
@@ -51,8 +52,10 @@ Run all four before pushing.
   under `applied`. Unknown or ambiguous names fail with candidates rather than guessing.
 - Inputs are hand-written JSON Schema (validated by the SDK before the handler runs); outputs are
   valibot schemas the SDK enforces. Every parameter and output field is camelCase (tested).
-- **Sign-in never handles an Immich password and never stores a key.** Keys are pasted, must be
-  read-only, and travel only inside sealed tokens. Redirect URIs stay on an allowlist.
+- **Sign-in stores nothing.** A password is used for one Immich login to create a read-only key
+  (`immichLogin.ts`), then dropped: never stored, logged, echoed back or put in a token. Keys,
+  created or pasted, must be read-only and travel only inside sealed tokens. Redirect URIs stay
+  on an allowlist.
 - Tool descriptions are written for a model choosing between tools: say when to use it and when to
   use a sibling instead.
 

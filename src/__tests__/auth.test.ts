@@ -22,20 +22,23 @@ const SECRET = "0123456789abcdefghijklmnopqrstuvwxyzABCD";
 const CLAUDE = "https://claude.ai/api/mcp/auth_callback";
 const ADA_KEY = "ada-key-0000000000000000";
 const JOSE_KEY = "jose-key-000000000000000";
+const ADA_EMAIL = "ada@example.test";
+const ADA_PASSWORD = "correct horse battery staple";
 
 const closers: Array<() => Promise<void>> = [];
 afterEach(async () => {
   await Promise.all(closers.splice(0).map((close) => close()));
 });
 
-function setup() {
+function setup({ passwordSignIn = true } = {}) {
   const fake = fakeImmich();
+  fake.users.set(ADA_EMAIL, ADA_PASSWORD);
   fake.apiKeys.set(ADA_KEY, READ_PERMISSIONS);
   fake.apiKeys.set(JOSE_KEY, [...READ_PERMISSIONS, "album.statistics"]);
   // Starts at the real time: the SDK checks token expiry against the real clock.
   const clock = { ms: Date.now() };
   const oauth = createOAuthServer({
-    config: { publicUrl: PUBLIC, secret: SECRET, redirectUris: [] },
+    config: { publicUrl: PUBLIC, secret: SECRET, redirectUris: [], passwordSignIn },
     immich: { baseUrl: BASE, publicUrl: BASE, timeoutMs: 30_000 },
     fetch: fake.fetch,
     now: () => clock.ms,
@@ -378,6 +381,161 @@ describe("the sign-in page", () => {
   });
 });
 
+describe("signing in with an Immich email and password", () => {
+  const verifier = "v".repeat(43);
+  const challenge = createHash("sha256").update(verifier).digest("base64url");
+
+  /** Opens the page for a fresh client and posts the password form. */
+  const submit = async (
+    ctx: ReturnType<typeof setup>,
+    fields: { email?: string; password?: string },
+    clientName = "Claude",
+  ) => {
+    const { body } = await ctx.register([CLAUDE], clientName);
+    const { request } = await ctx.openSignIn(body.client_id, challenge);
+    const response = await ctx.postForm("/authorize", {
+      request,
+      method: "password",
+      email: fields.email ?? ADA_EMAIL,
+      password: fields.password ?? ADA_PASSWORD,
+    });
+    return { response, clientId: body.client_id as string };
+  };
+
+  it("offers the form, and the key form only as the alternative", async () => {
+    const { register, openSignIn } = setup();
+    const { body } = await register();
+    const { html } = await openSignIn(body.client_id, challenge);
+    expect(html).toContain('name="password"');
+    expect(html).toContain('autocomplete="current-password"');
+    expect(html).toContain("<summary>Use an API key instead</summary>");
+    expect(html).toContain("It is\nnot stored");
+  });
+
+  it("creates a read-only key, signs out of Immich, and connects with that key", async () => {
+    const ctx = setup();
+    const { response, clientId } = await submit(ctx, {});
+    expect(response.status).toBe(303);
+
+    expect(ctx.fake.createdKeys).toHaveLength(1);
+    expect(ctx.fake.createdKeys[0]).toMatchObject({
+      name: "Immich MCP (Claude)",
+      permissions: READ_PERMISSIONS,
+    });
+    // The session opened with the password is closed again.
+    expect(ctx.fake.sessions.size).toBe(0);
+    expect(ctx.fake.callsTo("POST", "/api/auth/logout")).toHaveLength(1);
+
+    const code = new URL(response.headers.get("location") ?? "").searchParams.get("code") ?? "";
+    const exchanged = await ctx.postForm("/token", {
+      grant_type: "authorization_code",
+      code,
+      code_verifier: verifier,
+      client_id: clientId,
+    });
+    const tokens = (await exchanged.json()) as Record<string, any>;
+    expect(exchanged.status).toBe(200);
+    // Neither the password nor the key is readable in what the client holds.
+    expect(JSON.stringify(tokens)).not.toContain(ADA_PASSWORD);
+    expect(JSON.stringify(tokens)).not.toContain(ctx.fake.createdKeys[0].secret);
+
+    const used = await ctx.postJson("/mcp", INITIALIZE, {
+      ...MCP_HEADERS,
+      authorization: `Bearer ${tokens.access_token}`,
+    });
+    expect(used.status).toBe(200);
+  });
+
+  it("sends the password to Immich's login and nowhere else", async () => {
+    const ctx = setup();
+    await submit(ctx, {});
+    const carrying = ctx.fake.calls.filter((call) =>
+      JSON.stringify(call.body ?? "").includes(ADA_PASSWORD),
+    );
+    expect(carrying.map((call) => `${call.method} ${call.path}`)).toEqual(["POST /api/auth/login"]);
+  });
+
+  it("replaces the key from the last sign-in of the same app, and leaves other apps' keys", async () => {
+    const ctx = setup();
+    await submit(ctx, {}, "Claude");
+    await submit(ctx, {}, "Another App");
+    const first = ctx.fake.createdKeys[0].secret;
+    await submit(ctx, {}, "Claude");
+
+    expect(ctx.fake.createdKeys.map((key) => key.name).sort()).toEqual([
+      "Immich MCP (Another App)",
+      "Immich MCP (Claude)",
+    ]);
+    expect(ctx.fake.apiKeys.has(first)).toBe(false);
+  });
+
+  it("keeps the form open on a wrong password, with the email and never the password", async () => {
+    const ctx = setup();
+    const { response } = await submit(ctx, { password: "wrong password" });
+    expect(response.status).toBe(400);
+    expect(response.headers.get("location")).toBeNull();
+    const html = await response.text();
+    expect(html).toContain("Incorrect email or password.");
+    expect(html).toContain(`value="${ADA_EMAIL}"`);
+    expect(html).not.toContain("wrong password");
+    expect(ctx.fake.createdKeys).toHaveLength(0);
+  });
+
+  it("makes an account wait after five wrong passwords, without calling Immich again", async () => {
+    const ctx = setup();
+    for (let i = 0; i < 5; i++) {
+      // Different addresses, so the per-address budget is not what stops it.
+      const { body } = await ctx.register();
+      const { request } = await ctx.openSignIn(body.client_id, challenge);
+      const response = await ctx.oauth.routes(
+        new Request(`${PUBLIC}/authorize`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/x-www-form-urlencoded",
+            "x-forwarded-for": `198.51.100.${i}`,
+          },
+          body: new URLSearchParams({
+            request,
+            method: "password",
+            email: "Ada@Example.test",
+            password: "guess",
+          }).toString(),
+        }),
+      );
+      expect(response?.status).toBe(400);
+    }
+    const logins = ctx.fake.callsTo("POST", "/api/auth/login").length;
+    const { response } = await submit(ctx, {});
+    expect(response.status).toBe(429);
+    expect(await response.text()).toContain("Wait 15 minutes");
+    expect(ctx.fake.callsTo("POST", "/api/auth/login")).toHaveLength(logins);
+
+    ctx.clock.ms += 16 * 60_000;
+    expect((await submit(ctx, {})).response.status).toBe(303);
+  });
+
+  it("signs out of Immich even when the key cannot be created", async () => {
+    const ctx = setup();
+    ctx.fake.respond("POST", "/api/api-keys", () => new Response("boom", { status: 500 }));
+    const { response } = await submit(ctx, {});
+    expect(response.status).toBe(502);
+    expect(ctx.fake.callsTo("POST", "/api/auth/logout")).toHaveLength(1);
+  });
+
+  it("can be turned off, leaving only the key form", async () => {
+    const ctx = setup({ passwordSignIn: false });
+    const { body } = await ctx.register();
+    const { html } = await ctx.openSignIn(body.client_id, challenge);
+    expect(html).not.toContain('name="password"');
+    expect(html).toContain('name="api_key"');
+
+    const { response } = await submit(ctx, {});
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain("turned off");
+    expect(ctx.fake.callsTo("POST", "/api/auth/login")).toHaveLength(0);
+  });
+});
+
 describe("tokens", () => {
   it("exchanges the code once, with the right verifier, for tokens that hide the key", async () => {
     const { signIn, postForm } = setup();
@@ -622,7 +780,11 @@ describe("loadAuthConfig", () => {
       publicUrl: "https://photos-mcp.example.test",
       secret: SECRET,
       redirectUris: ["https://agent.example.test/callback"],
+      passwordSignIn: true,
     });
+    expect(loadAuthConfig({ ...oauth, IMMICH_MCP_PASSWORD_SIGN_IN: "false" })?.passwordSignIn).toBe(
+      false,
+    );
   });
 
   it.each([
@@ -635,6 +797,7 @@ describe("loadAuthConfig", () => {
     [{ ...oauth, IMMICH_MCP_PUBLIC_URL: "https://example.test/mcp" }, "without a path"],
     [{ ...oauth, IMMICH_API_KEY: "k" }, "Unset IMMICH_API_KEY"],
     [{ ...oauth, IMMICH_MCP_OAUTH_REDIRECT_URIS: "not a uri" }, "invalid URI"],
+    [{ ...oauth, IMMICH_MCP_PASSWORD_SIGN_IN: "maybe" }, 'must be "true" or "false"'],
   ])("rejects %o", (env, message) => {
     expect(() => loadAuthConfig(env)).toThrow(ConfigurationError);
     expect(() => loadAuthConfig(env)).toThrow(message);

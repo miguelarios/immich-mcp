@@ -82,10 +82,22 @@ authorization server, and signing in means giving it a key.
 
 ## Decisions
 
-- **Paste a key; no password form.** The page at `/authorize` asks for an Immich API key the person
-  created themselves. The server never handles an Immich password, it works the same for password
-  and passkey accounts, and it will keep working when Immich logins move to an identity provider.
-  The cost is a few clicks in Immich's settings, once per person.
+- **Email and password, used once; paste a key as the alternative.** The first version only
+  accepted a pasted key, so the server never saw a password. In use that was too hard: leave the
+  page, find API Keys in Immich's settings, tick four permissions out of 170, paste. So the page
+  now takes the Immich email and password, and `immichLogin.ts` signs in, creates the key with
+  exactly the four permissions, and signs out. The password exists in memory for that one call.
+  What the client holds is unchanged: the sealed key.
+  - The key is named for the connecting app (`Immich MCP (Claude)`), and a sign-in replaces the
+    key of the same name, so keys do not pile up and another app's key is left alone.
+  - Immich sees every attempt as coming from this server and cannot throttle guesses per caller,
+    so wrong passwords are counted per account here (five in 15 minutes), on top of the
+    per-address budget. It holds back this form only, never Immich's own login.
+  - Pasting a key remains for accounts without a password, and
+    `IMMICH_MCP_PASSWORD_SIGN_IN=false` removes the password form for an operator who does not
+    want the server to touch passwords.
+  - The cost: a second page where the family types their Immich password. The page's warning,
+    the redirect allowlist and the reverse proxy's rate limit are what stand against that.
 - **Read-only keys only.** A key is accepted when Immich reports the four permissions the tools
   need and nothing outside a short list of photo-library reads (statistics, faces, map, memories,
   stacks, tags, timeline). A full-access key is refused, and so is one that can read sessions,
@@ -126,14 +138,17 @@ authorization server, and signing in means giving it a key.
 
 ### Rejected
 
-- **Immich email and password form.** A second place where the family types their Immich
-  password, a password-guessing surface that Immich cannot rate-limit per client (every attempt
-  comes from this server), and no way in for passkey-only accounts.
+- **Paste-a-key as the only way in.** Shipped in 0.2.0 and kept as the alternative; as the only
+  option it asked too much of the people this is for.
+- **Passkey sign-in on this page.** Passkeys are bound to Immich's own hostname, so this server
+  cannot run the ceremony.
 - **SQLite for clients, codes and tokens.** Needed only for revocation, which Immich already has.
 - **An identity provider in front of `/mcp`** (forward auth). MCP clients call from their own
   servers and cannot complete an interactive login per request.
 
 ## Later
 
-A second factor: Immich passkeys already cover signing in to Immich itself, which is the only
-login in this flow. An identity provider would slot in as a step before the paste page.
+A second factor. The password form goes straight to Immich's password login, so it bypasses any
+second factor put in front of Immich's web login later. When that day comes, either turn the
+form off (`IMMICH_MCP_PASSWORD_SIGN_IN=false`) or put the identity provider in front of this
+page as a step before it.

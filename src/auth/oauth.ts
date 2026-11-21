@@ -8,6 +8,7 @@ import {
 import { ImmichMcpError } from "../errors.js";
 import { ImmichClient } from "../immich/client.js";
 import { type AuthConfig, isLoopbackHost } from "./config.js";
+import { createKeyWithPassword } from "./immichLogin.js";
 import { REQUIRED_PERMISSIONS, errorPage, signInPage } from "./page.js";
 import { Sealer, sha256 } from "./seal.js";
 
@@ -39,6 +40,13 @@ const MAX_PENDING_CODES = 1000;
  */
 const MAX_KEY_CHECKS_PER_MINUTE = 60;
 const MAX_KEY_CHECKS_PER_ADDRESS = 10;
+/**
+ * Wrong passwords allowed for one account before it has to wait. Immich sees
+ * every attempt as coming from this server, so it cannot do this itself. It
+ * only holds back this form: signing in to Immich directly is unaffected.
+ */
+const MAX_FAILED_PASSWORDS = 5;
+const FAILED_PASSWORD_WINDOW_MS = 15 * 60_000;
 const MAX_BODY_BYTES = 16 * 1024;
 
 const SCOPE = "photos.read";
@@ -258,6 +266,22 @@ export function createOAuthServer(options: OAuthServerOptions): OAuthServer {
     return true;
   };
 
+  let failedPasswords: Array<{ at: number; account: string }> = [];
+  const failuresFor = (account: string): number => {
+    const cutoff = now() - FAILED_PASSWORD_WINDOW_MS;
+    failedPasswords = failedPasswords.filter((failure) => failure.at > cutoff);
+    return failedPasswords.filter((failure) => failure.account === account).length;
+  };
+
+  /** The name of the key a password sign-in creates, and replaces next time. */
+  const keyNameFor = (clientName: string) =>
+    `Immich MCP (${
+      clientName
+        .replace(/[^\p{L}\p{N} ._-]/gu, "")
+        .trim()
+        .slice(0, 40) || "app"
+    })`;
+
   const looksLikeKey = (apiKey: string) => /^[\x21-\x7e]{8,200}$/.test(apiKey);
 
   /** Asks Immich about a key. `undefined` means it is a usable read-only key. */
@@ -412,6 +436,7 @@ export function createOAuthServer(options: OAuthServerOptions): OAuthServer {
       clientName: client.n,
       redirectUri,
       immichUrl: immich.publicUrl,
+      passwordSignIn: config.passwordSignIn,
       request: sealer.seal("sign-in", signIn),
     });
   };
@@ -435,24 +460,53 @@ export function createOAuthServer(options: OAuthServerOptions): OAuthServer {
     if (!signIn || signIn.exp <= seconds()) {
       return errorPage("This sign-in page expired. Go back to the app and connect again.");
     }
+    const email = (form.get("email") ?? "").trim();
     const again = (error: string, status: number) =>
       signInPage({
         clientName: signIn.n,
         redirectUri: signIn.ru,
         immichUrl: immich.publicUrl,
         request: sealed,
+        passwordSignIn: config.passwordSignIn,
+        email,
         error,
         status,
       });
 
-    const apiKey = (form.get("api_key") ?? "").trim();
-    // Decided without calling Immich, so it costs nothing from the budget below.
-    if (!looksLikeKey(apiKey)) return again("That does not look like an Immich API key.", 400);
-    if (!keyCheckAllowed(clientAddress(request))) {
-      return again("Too many attempts right now. Wait a minute.", 429);
+    let apiKey = (form.get("api_key") ?? "").trim();
+    const method = form.get("method") ?? (apiKey ? "key" : "password");
+    if (method === "password") {
+      if (!config.passwordSignIn) return again("Signing in with a password is turned off.", 400);
+      const password = form.get("password") ?? "";
+      if (!/^\S+@\S+$/.test(email) || email.length > 254 || !password || password.length > 1024) {
+        return again("Enter your Immich email and password.", 400);
+      }
+      const account = email.toLowerCase();
+      if (failuresFor(account) >= MAX_FAILED_PASSWORDS) {
+        return again("Too many wrong passwords for this account. Wait 15 minutes.", 429);
+      }
+      if (!keyCheckAllowed(clientAddress(request))) {
+        return again("Too many attempts right now. Wait a minute.", 429);
+      }
+      const result = await createKeyWithPassword(
+        { baseUrl: immich.baseUrl, timeoutMs: immich.timeoutMs, fetch: options.fetch },
+        { email, password },
+        { name: keyNameFor(signIn.n), permissions: REQUIRED_PERMISSIONS },
+      );
+      if (!result.ok) {
+        if (result.kind === "rejected") failedPasswords.push({ at: now(), account });
+        return again(result.message, result.kind === "unreachable" ? 502 : 400);
+      }
+      apiKey = result.apiKey;
+    } else {
+      // Decided without calling Immich, so it costs nothing from the budget below.
+      if (!looksLikeKey(apiKey)) return again("That does not look like an Immich API key.", 400);
+      if (!keyCheckAllowed(clientAddress(request))) {
+        return again("Too many attempts right now. Wait a minute.", 429);
+      }
+      const problem = await keyProblem(apiKey);
+      if (problem) return again(problem.message, problem.kind === "unreachable" ? 502 : 400);
     }
-    const problem = await keyProblem(apiKey);
-    if (problem) return again(problem.message, problem.kind === "unreachable" ? 502 : 400);
 
     dropExpiredCodes();
     if (codes.size >= MAX_PENDING_CODES) return again("Too busy right now. Wait a minute.", 503);

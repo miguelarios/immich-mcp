@@ -34,6 +34,7 @@ const STYLE = `
   button { margin-top: 1rem; padding: .6rem 1.2rem; font: inherit; font-weight: 600; cursor: pointer; }
   .warn { border-left: 4px solid #b26a00; padding: .5rem .75rem; margin: 1rem 0; }
   .error { border-left: 4px solid #c62828; padding: .5rem .75rem; margin: 1rem 0; }
+  details { margin-top: 1.5rem; } summary { cursor: pointer; font-weight: 600; }
   .note { opacity: .75; font-size: .9rem; margin-top: 1.5rem; }
 `;
 
@@ -59,8 +60,12 @@ export interface SignInPage {
   redirectUri: string;
   /** The Immich origin people open in a browser. */
   immichUrl: string;
-  /** The sealed authorization request, posted back with the key. */
+  /** The sealed authorization request, posted back with the form. */
   request: string;
+  /** Offer the email-and-password form; otherwise only an API key can be pasted. */
+  passwordSignIn: boolean;
+  /** The email to put back in the form after a failed attempt. Never the password. */
+  email?: string;
   error?: string;
   status?: number;
 }
@@ -72,6 +77,38 @@ export function signInPage(view: SignInPage): Response {
   const permissions = REQUIRED_PERMISSIONS.map((p) => `<code>${p}</code>`).join(", ");
   const keysUrl = escapeHtml(`${view.immichUrl}/user-settings?isOpen=api-keys`);
   const error = view.error ? `<p class="error" role="alert">${escapeHtml(view.error)}</p>` : "";
+  const request = `<input type="hidden" name="request" value="${escapeHtml(view.request)}">`;
+
+  const keyForm = `<ol>
+<li>Open <a href="${keysUrl}" target="_blank" rel="noopener noreferrer">Immich &rarr; Account Settings &rarr; API Keys</a>
+and sign in as usual.</li>
+<li>Create a key with only these permissions: ${permissions}.</li>
+<li>Paste the key below.</li>
+</ol>
+<form method="post" action="/authorize">
+${request}
+<input type="hidden" name="method" value="key">
+<label for="api_key">Immich API key</label>
+<input id="api_key" name="api_key" type="password" required autocomplete="off" spellcheck="false">
+<button type="submit">Connect with this key</button>
+</form>`;
+
+  const passwordForm = `<form method="post" action="/authorize">
+${request}
+<input type="hidden" name="method" value="password">
+<label for="email">Immich email</label>
+<input id="email" name="email" type="email" required autocomplete="username" autocapitalize="none"
+ spellcheck="false" value="${escapeHtml(view.email ?? "")}">
+<label for="password">Immich password</label>
+<input id="password" name="password" type="password" required autocomplete="current-password">
+<button type="submit">Sign in and connect</button>
+</form>
+<p class="note">Your password is sent to Immich once, to create a read-only key for this app. It is
+not stored. To disconnect later, delete that key in Immich (Account Settings, API Keys).</p>
+<details>
+<summary>Use an API key instead</summary>
+${keyForm}
+</details>`;
 
   return page(
     "Connect your Immich photos",
@@ -81,19 +118,12 @@ view your photos. After you connect, you return to ${returnsTo}.</p>
 <p class="warn"><strong>Only continue if you started this yourself, just now, in your own app.</strong>
 If someone sent you a link to this page, close it: connecting would give them your photos.</p>
 ${error}
-<ol>
-<li>Open <a href="${keysUrl}" target="_blank" rel="noopener noreferrer">Immich &rarr; Account Settings &rarr; API Keys</a>
-and sign in as usual.</li>
-<li>Create a key with only these permissions: ${permissions}.</li>
-<li>Paste the key below.</li>
-</ol>
-<form method="post" action="/authorize">
-<input type="hidden" name="request" value="${escapeHtml(view.request)}">
-<label for="api_key">Immich API key</label>
-<input id="api_key" name="api_key" type="password" required autocomplete="off" spellcheck="false">
-<button type="submit">Connect</button>
-</form>
-<p class="note">The key can only read. To disconnect later, delete it in Immich.</p>`,
+${
+  view.passwordSignIn
+    ? passwordForm
+    : `${keyForm}
+<p class="note">The key can only read. To disconnect later, delete it in Immich.</p>`
+}`,
     view.status ?? 200,
   );
 }
