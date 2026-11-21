@@ -1,0 +1,44 @@
+{
+  "name": "immich-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for Immich photo retrieval: search by context (CLIP), by text in the image (OCR) and by metadata, then view the photo",
+  "keywords": ["mcp", "immich", "photos", "ocr", "clip", "smart-search"],
+  "license": "MIT",
+  "author": "Miguel Rios",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/miguelarios/immich-mcp.git"
+  },
+  "homepage": "https://github.com/miguelarios/immich-mcp",
+  "bugs": "https://github.com/miguelarios/immich-mcp/issues",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "packageManager": "npm@10.9.2",
+  "bin": {
+    "immich-mcp": "dist/bin/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && chmod +x dist/bin/cli.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "start": "node dist/bin/cli.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.0.0",
+    "@valibot/to-json-schema": "^1.7.1",
+    "valibot": "^1.4.2"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.0",
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

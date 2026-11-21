@@ -1,0 +1,122 @@
+name: Release on merge
+
+# Merging a `chore(release):` PR is the release. When package.json's version
+# changes on main, this tags v<version>, creates the GitHub Release with the
+# matching CHANGELOG.md section as its notes, then builds and pushes the
+# container image. There is no npm package: the image is the artifact.
+on:
+  push:
+    branches: [main]
+  # Retry path for a release whose tag or image failed after the merge. Safe
+  # to repeat: an existing tag and Release are skipped, and the image build is
+  # idempotent for a given tag.
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.scan.outputs.version }}
+      release: ${{ steps.scan.outputs.release }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Did the version change?
+        id: scan
+        env:
+          BEFORE: ${{ github.event.before }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          NEW=$(jq -r .version package.json)
+          # github.event.before spans the whole push, so a two-commit push that
+          # bumps then fixes is compared against the right baseline.
+          BASE="$BEFORE"
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            BASE="HEAD^"
+          fi
+          if git cat-file -e "${BASE}:package.json" 2>/dev/null; then
+            OLD=$(git show "${BASE}:package.json" | jq -r '.version // ""')
+          else
+            OLD=""
+          fi
+          echo "version=$NEW" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/v${NEW}" >/dev/null && [ "$EVENT" != "workflow_dispatch" ]; then
+            echo "::notice::v${NEW} is already tagged"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT" = "workflow_dispatch" ] || [ "$NEW" != "$OLD" ]; then
+            echo "release: ${OLD:-none} -> ${NEW}"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No version change in this push."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  tag:
+    needs: detect
+    if: needs.detect.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the tag, create the Release
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Tag and release
+        env:
+          VERSION: ${{ needs.detect.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # The CHANGELOG section headed `## <version> (<date>)`, matched literally.
+          VER_RE=$(printf '%s' "$VERSION" | sed 's/[.[\*^$()+?{|]/\\&/g')
+          NOTES="$(mktemp)"
+          awk -v ver="$VER_RE" '
+            $0 ~ "^## " ver "([ (]|$)" { f = 1; next }
+            /^## / { f = 0 }
+            f
+          ' CHANGELOG.md > "$NOTES"
+          if [ ! -s "$NOTES" ]; then
+            echo "::error::CHANGELOG.md has no '## ${VERSION}' section"
+            exit 1
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::notice::$TAG is already pushed"
+          else
+            MSG="$(mktemp)"
+            printf 'immich-mcp %s\n\n' "$VERSION" > "$MSG"
+            cat "$NOTES" >> "$MSG"
+            git tag -a "$TAG" -F "$MSG"
+            git push origin "$TAG"
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice::Release $TAG already exists"
+          else
+            PRERELEASE=""
+            [[ "$VERSION" == *-* ]] && PRERELEASE="--prerelease"
+            gh release create "$TAG" --title "immich-mcp ${VERSION}" --notes-file "$NOTES" $PRERELEASE
+          fi
+
+  image:
+    needs: [detect, tag]
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker.yml
+    with:
+      version: ${{ needs.detect.outputs.version }}

@@ -1,0 +1,185 @@
+name: Container image
+
+# Builds ghcr.io/<owner>/immich-mcp from the Dockerfile. Three ways in:
+#
+#   * workflow_call — release.yml calls this after it tags a version, so
+#     merging a version bump is also the image release.
+#   * workflow_dispatch — rebuild a released version by hand from its tag.
+#   * pull_request — builds the PR's tree for amd64 and smoke-tests it: the
+#     container must start, report healthy, answer /healthz and MCP
+#     tools/list, and run as the unprivileged node user. Nothing is pushed.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Released version, e.g. 0.1.0"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Released version to rebuild, e.g. 0.1.0 (tag v<version> must exist)"
+        required: true
+        type: string
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io
+    steps:
+      - name: Resolve target
+        id: target
+        env:
+          VERSION: ${{ inputs.version }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$VERSION' is not an exact version like 0.1.0"
+            exit 1
+          fi
+          # Floating tags (latest, 1, 1.2) only move for the newest stable
+          # release, so a hand-run rebuild of an old version cannot move them
+          # backwards. A prerelease never gets them.
+          NEWEST=$(gh api "repos/${REPO}/tags" --paginate --jq '.[].name' \
+            | sed -n 's/^v\([0-9]*\.[0-9]*\.[0-9]*\)$/\1/p' | sort -V | tail -1)
+          if [ "$NEWEST" = "$VERSION" ] && [[ "$VERSION" != *-* ]]; then FLOAT=true; else FLOAT=false; fi
+          echo "newest stable tag is v${NEWEST:-none}; floating tags: $FLOAT"
+          {
+            echo "image=ghcr.io/${OWNER,,}/immich-mcp"
+            echo "float=$FLOAT"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v5
+        with:
+          ref: v${{ inputs.version }}
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        env:
+          # GHCR reads a multi-arch package's description from the index.
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+        with:
+          images: ${{ steps.target.outputs.image }}
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}},value=${{ inputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.version }},enable=${{ steps.target.outputs.float }}
+            type=semver,pattern={{major}},value=${{ inputs.version }},enable=${{ steps.target.outputs.float }}
+            type=raw,value=latest,enable=${{ steps.target.outputs.float }}
+          labels: |
+            org.opencontainers.image.title=immich-mcp
+            org.opencontainers.image.version=${{ inputs.version }}
+          annotations: |
+            org.opencontainers.image.title=immich-mcp
+            org.opencontainers.image.description=MCP server for Immich photo retrieval: search by context, OCR text and metadata
+            org.opencontainers.image.version=${{ inputs.version }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          build-args: |
+            VERSION=${{ inputs.version }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: true
+          sbom: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+
+      - name: Summary
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "### immich-mcp ${{ inputs.version }}"
+            echo
+            echo "Digest: \`${DIGEST}\`"
+            echo
+            printf -- '- `%s`\n' $TAGS
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: smoke:immich-mcp
+
+      - name: Starts, reports healthy and serves MCP
+        run: |
+          set -euo pipefail
+          # Dummy credentials: the server validates config at startup but only
+          # calls Immich on a tool call, which tools/list is not.
+          docker run -d --name smoke -p 127.0.0.1:3000:3000 \
+            -e IMMICH_URL=https://immich.invalid -e IMMICH_API_KEY=dummy -e TZ=America/Chicago \
+            smoke:immich-mcp
+          STATUS=starting
+          for _ in $(seq 1 30); do
+            STATUS=$(docker inspect -f '{{.State.Health.Status}}' smoke)
+            [ "$STATUS" = "healthy" ] && break
+            sleep 2
+          done
+          docker logs smoke
+          if [ "$STATUS" != "healthy" ]; then
+            echo "::error::Health status is '$STATUS' after 60s"
+            exit 1
+          fi
+          [ "$(curl -fsS http://127.0.0.1:3000/healthz)" = "ok" ]
+          [ "$(docker exec smoke id -un)" = "node" ]
+
+          # A 2025-era initialize over Streamable HTTP, then tools/list.
+          H=(-H 'content-type: application/json' -H 'accept: application/json, text/event-stream')
+          SID=$(curl -fsS -D - -o /dev/null "${H[@]}" http://127.0.0.1:3000/mcp \
+            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}' \
+            | tr -d '\r' | sed -n 's/^mcp-session-id: //Ip')
+          [ -n "$SID" ] || { echo "::error::no session id"; exit 1; }
+          curl -fsS "${H[@]}" -H "mcp-session-id: $SID" -H 'mcp-protocol-version: 2025-06-18' \
+            http://127.0.0.1:3000/mcp -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' -o /dev/null
+          TOOLS=$(curl -fsS "${H[@]}" -H "mcp-session-id: $SID" -H 'mcp-protocol-version: 2025-06-18' \
+            http://127.0.0.1:3000/mcp -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}')
+          echo "$TOOLS" | grep -o '"name":"[a-z_]*"' | sort -u
+          for tool in search_photos search_photo_text search_photo_metadata get_photo view_photo list_people list_albums; do
+            echo "$TOOLS" | grep -q "\"name\":\"$tool\"" || { echo "::error::tools/list is missing $tool"; exit 1; }
+          done
+          echo "healthy, running as node, serving every tool"
+
+      - name: Refuses to start without configuration
+        run: |
+          set -euo pipefail
+          if docker run --rm smoke:immich-mcp > out.txt 2>&1; then
+            echo "::error::started with no IMMICH_URL"; exit 1
+          fi
+          cat out.txt
+          grep -q "Missing required environment: IMMICH_URL, IMMICH_API_KEY" out.txt
