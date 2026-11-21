@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0 (2026-11-21)
+
+Signing in no longer needs an API key made by hand.
+
+- The sign-in page takes an Immich email and password. The server signs in to Immich once, creates
+  a read-only key named `Immich MCP (<app> · <id>)`, signs out and drops the password. It is never
+  stored, logged or put in a token.
+- Signing in again from the same app replaces its key; no other app's key is ever removed.
+- Five wrong passwords make an account wait 15 minutes on this page. Immich's own login is not
+  affected.
+- Pasting a key is still offered on the page, and `IMMICH_MCP_PASSWORD_SIGN_IN=false` removes the
+  password form.
+- The container image's build stage no longer runs under arm64 emulation, which hung the `0.2.0`
+  release build.
+
 ## 0.2.0 (2026-11-21)
 
 Sign-in, so one server can serve a household. Off by default; `0.1.0` setups run unchanged.

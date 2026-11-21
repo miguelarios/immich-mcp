@@ -1,6 +1,6 @@
 {
   "name": "immich-mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "MCP server for Immich photo retrieval: search by context (CLIP), by text in the image (OCR) and by metadata, then view the photo",
   "keywords": ["mcp", "immich", "photos", "ocr", "clip", "smart-search"],
   "license": "MIT",
