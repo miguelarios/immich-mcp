@@ -137,9 +137,11 @@ blocks DNS-rebinding attacks from web pages.
 answers only a valid token:
 
 - **A password is used once and never kept.** The sign-in page takes an Immich email and
-  password, signs in to Immich, creates a read-only API key named `Immich MCP (<app>)`, signs out
-  and drops the password. It is not stored, logged or put in a token. Signing in again replaces
-  that key. Five wrong passwords make an account wait 15 minutes on this page (not in Immich).
+  password, signs in to Immich, creates a read-only API key named `Immich MCP (<app> · <id>)`,
+  signs out and drops the password. It is not stored, logged or put in a token. Signing in again
+  from the same app replaces that key; another app's key, or the same app on another computer,
+  is never touched. Five wrong passwords make an account wait 15 minutes on this page (not in
+  Immich). Anyone who knows an email can trigger that wait; pasting a key still works meanwhile.
 - **Or no password at all.** The page also accepts a pasted API key, and
   `IMMICH_MCP_PASSWORD_SIGN_IN=false` leaves that as the only way in. A pasted key that can do
   more than read is refused, as is one missing `asset.read`, `asset.view`, `person.read` or

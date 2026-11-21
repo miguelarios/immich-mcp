@@ -17,9 +17,26 @@ export interface ImmichLoginOptions {
   fetch?: Fetch;
 }
 
+export interface KeyRequest {
+  /** The new key's name. Keys with exactly this name are replaced. */
+  name: string;
+  permissions: string[];
+  /**
+   * Keys whose name starts with `prefix` and that were created before `before`
+   * (an ISO instant) are leftovers no sign-in can still be using; they are removed too.
+   */
+  expired?: { prefix: string; before: string };
+}
+
 export type PasswordSignIn =
   | { ok: true; apiKey: string }
-  | { ok: false; kind: "rejected" | "unreachable"; message: string };
+  | {
+      ok: false;
+      kind: "rejected" | "unreachable";
+      message: string;
+      /** A wrong password, as opposed to input Immich would not even consider. */
+      wrongPassword?: boolean;
+    };
 
 const UNREACHABLE: PasswordSignIn = {
   ok: false,
@@ -30,7 +47,9 @@ const UNREACHABLE: PasswordSignIn = {
 export async function createKeyWithPassword(
   options: ImmichLoginOptions,
   credentials: { email: string; password: string },
-  key: { name: string; permissions: string[] },
+  key: KeyRequest,
+  /** The caller's address, passed on so Immich's own log names them and not this server. */
+  clientAddress?: string,
 ): Promise<PasswordSignIn> {
   const fetchImpl = options.fetch ?? globalThis.fetch;
   const call = (method: string, path: string, session?: string, body?: unknown) =>
@@ -40,19 +59,31 @@ export async function createKeyWithPassword(
         accept: "application/json",
         ...(session ? { authorization: `Bearer ${session}` } : {}),
         ...(body === undefined ? {} : { "content-type": "application/json" }),
+        ...(clientAddress ? { "x-forwarded-for": clientAddress } : {}),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
       // A redirect would carry the password or the session somewhere else.
       redirect: "error",
       signal: AbortSignal.timeout(options.timeoutMs),
     });
+  const discard = (response: Response) => response.body?.cancel().catch(() => undefined);
 
   let session: string;
   try {
     const response = await call("POST", "/auth/login", undefined, credentials);
-    if (response.status === 400 || response.status === 401) {
-      await response.body?.cancel().catch(() => undefined);
-      return { ok: false, kind: "rejected", message: "Incorrect email or password." };
+    if (response.status === 401) {
+      await discard(response);
+      return {
+        ok: false,
+        kind: "rejected",
+        message: "Incorrect email or password.",
+        wrongPassword: true,
+      };
+    }
+    if (response.status === 400) {
+      // Immich would not take the input at all (an address it does not consider an email).
+      await discard(response);
+      return { ok: false, kind: "rejected", message: "Immich did not accept that email address." };
     }
     if (!response.ok) return UNREACHABLE;
     const token = ((await response.json()) as { accessToken?: unknown }).accessToken;
@@ -63,30 +94,51 @@ export async function createKeyWithPassword(
   }
 
   try {
-    // Signing in again replaces the key from last time instead of adding one more.
-    const listed = await call("GET", "/api-keys", session);
-    if (listed.ok) {
-      const existing = (await listed.json()) as Array<{ id?: unknown; name?: unknown }>;
+    // The new key first: if this fails, whatever connection the person had still works.
+    const created = await call("POST", "/api-keys", session, {
+      name: key.name,
+      permissions: key.permissions,
+    });
+    if (!created.ok) return UNREACHABLE;
+    const made = (await created.json()) as {
+      secret?: unknown;
+      id?: unknown;
+      apiKey?: { id?: unknown };
+    };
+    if (typeof made.secret !== "string" || made.secret === "") return UNREACHABLE;
+    // Without the new key's id nothing is deleted: it could not be told apart from the old one.
+    const madeId = made.apiKey?.id ?? made.id;
+
+    // Then the ones it replaces. Best effort: a leftover key is untidy, not unsafe.
+    try {
+      const listed = await call("GET", "/api-keys", session);
+      const existing = listed.ok ? ((await listed.json()) as unknown) : await discard(listed);
       for (const old of Array.isArray(existing) ? existing : []) {
-        if (old.name === key.name && typeof old.id === "string") {
-          const removed = await call("DELETE", `/api-keys/${encodeURIComponent(old.id)}`, session);
-          await removed.body?.cancel().catch(() => undefined);
+        const { id, name, createdAt } = old as {
+          id?: unknown;
+          name?: unknown;
+          createdAt?: unknown;
+        };
+        if (typeof id !== "string" || typeof name !== "string" || id === madeId) continue;
+        const replaced = name === key.name && typeof madeId === "string";
+        const leftover =
+          key.expired !== undefined &&
+          name.startsWith(key.expired.prefix) &&
+          typeof createdAt === "string" &&
+          createdAt < key.expired.before;
+        if (replaced || leftover) {
+          await call("DELETE", `/api-keys/${encodeURIComponent(id)}`, session).then(discard);
         }
       }
-    } else {
-      await listed.body?.cancel().catch(() => undefined);
+    } catch {
+      // Keep the key that was just made.
     }
-
-    const created = await call("POST", "/api-keys", session, key);
-    if (!created.ok) return UNREACHABLE;
-    const secret = ((await created.json()) as { secret?: unknown }).secret;
-    if (typeof secret !== "string" || secret === "") return UNREACHABLE;
-    return { ok: true, apiKey: secret };
+    return { ok: true, apiKey: made.secret };
   } catch {
     return UNREACHABLE;
   } finally {
-    await call("POST", "/auth/logout", session)
-      .then((response) => response.body?.cancel())
-      .catch(() => undefined);
+    // The session can do anything the person can, so try twice to close it.
+    const logout = () => call("POST", "/auth/logout", session).then(discard);
+    await logout().catch(() => logout().catch(() => undefined));
   }
 }

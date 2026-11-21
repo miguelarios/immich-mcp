@@ -418,10 +418,8 @@ describe("signing in with an Immich email and password", () => {
     expect(response.status).toBe(303);
 
     expect(ctx.fake.createdKeys).toHaveLength(1);
-    expect(ctx.fake.createdKeys[0]).toMatchObject({
-      name: "Immich MCP (Claude)",
-      permissions: READ_PERMISSIONS,
-    });
+    expect(ctx.fake.createdKeys[0].name).toMatch(/^Immich MCP \(Claude · [\w-]{6}\)$/);
+    expect(ctx.fake.createdKeys[0].permissions).toEqual(READ_PERMISSIONS);
     // The session opened with the password is closed again.
     expect(ctx.fake.sessions.size).toBe(0);
     expect(ctx.fake.callsTo("POST", "/api/auth/logout")).toHaveLength(1);
@@ -455,18 +453,89 @@ describe("signing in with an Immich email and password", () => {
     expect(carrying.map((call) => `${call.method} ${call.path}`)).toEqual(["POST /api/auth/login"]);
   });
 
-  it("replaces the key from the last sign-in of the same app, and leaves other apps' keys", async () => {
-    const ctx = setup();
-    await submit(ctx, {}, "Claude");
-    await submit(ctx, {}, "Another App");
-    const first = ctx.fake.createdKeys[0].secret;
-    await submit(ctx, {}, "Claude");
+  /** Signs in again through an existing registration, as a client reconnecting does. */
+  const signInAgain = async (ctx: ReturnType<typeof setup>, clientId: string) => {
+    const { request } = await ctx.openSignIn(clientId, challenge);
+    const response = await ctx.postForm("/authorize", {
+      request,
+      method: "password",
+      email: ADA_EMAIL,
+      password: ADA_PASSWORD,
+    });
+    const code = new URL(response.headers.get("location") ?? "").searchParams.get("code") ?? "";
+    const exchanged = await ctx.postForm("/token", {
+      grant_type: "authorization_code",
+      code,
+      code_verifier: verifier,
+      client_id: clientId,
+    });
+    return (await exchanged.json()) as Record<string, any>;
+  };
+  const refresh = (ctx: ReturnType<typeof setup>, clientId: string, token: string) =>
+    ctx.postForm("/token", {
+      grant_type: "refresh_token",
+      refresh_token: token,
+      client_id: clientId,
+    });
 
-    expect(ctx.fake.createdKeys.map((key) => key.name).sort()).toEqual([
-      "Immich MCP (Another App)",
-      "Immich MCP (Claude)",
+  it("replaces the key when the same registration signs in again", async () => {
+    const ctx = setup();
+    const { body } = await ctx.register([CLAUDE], "Claude");
+    const first = await signInAgain(ctx, body.client_id);
+    const firstSecret = ctx.fake.createdKeys[0].secret;
+    const second = await signInAgain(ctx, body.client_id);
+
+    expect(ctx.fake.createdKeys).toHaveLength(1);
+    expect(ctx.fake.apiKeys.has(firstSecret)).toBe(false);
+    expect((await refresh(ctx, body.client_id, second.refresh_token)).status).toBe(200);
+    expect((await refresh(ctx, body.client_id, first.refresh_token)).status).toBe(400);
+  });
+
+  it("never removes another registration's key, whatever it calls itself", async () => {
+    const ctx = setup();
+    const mine = (await ctx.register([CLAUDE], "Claude")).body.client_id;
+    const tokens = await signInAgain(ctx, mine);
+    // The same app on another computer, and a stranger's client borrowing the name.
+    for (const name of ["Claude", "Claude!!", "Another App"]) {
+      await signInAgain(ctx, (await ctx.register([CLAUDE], name)).body.client_id);
+    }
+    expect(ctx.fake.createdKeys).toHaveLength(4);
+    expect((await refresh(ctx, mine, tokens.refresh_token)).status).toBe(200);
+  });
+
+  it("keeps the working connection when the new key cannot be created", async () => {
+    const ctx = setup();
+    const { body } = await ctx.register([CLAUDE], "Claude");
+    const tokens = await signInAgain(ctx, body.client_id);
+
+    ctx.fake.respond("POST", "/api/api-keys", () => new Response("boom", { status: 500 }));
+    const { request } = await ctx.openSignIn(body.client_id, challenge);
+    const failed = await ctx.postForm("/authorize", {
+      request,
+      method: "password",
+      email: ADA_EMAIL,
+      password: ADA_PASSWORD,
+    });
+    expect(failed.status).toBe(502);
+    expect(ctx.fake.callsTo("DELETE", `/api/api-keys/${ctx.fake.createdKeys[0].id}`)).toHaveLength(
+      0,
+    );
+    expect((await refresh(ctx, body.client_id, tokens.refresh_token)).status).toBe(200);
+  });
+
+  it("clears out this app's keys that are older than any sign-in can last", async () => {
+    const ctx = setup();
+    ctx.fake.clock.now = new Date(ctx.clock.ms - 400 * 24 * 3600_000).toISOString();
+    await signInAgain(ctx, (await ctx.register([CLAUDE], "Claude")).body.client_id);
+    await signInAgain(ctx, (await ctx.register([CLAUDE], "Another App")).body.client_id);
+    ctx.fake.clock.now = new Date(ctx.clock.ms).toISOString();
+    await signInAgain(ctx, (await ctx.register([CLAUDE], "Claude")).body.client_id);
+
+    // The year-old "Claude" key is gone; the other app's old key is not this app's to remove.
+    expect(ctx.fake.createdKeys.map((key) => key.name.replace(/ · .*/, ""))).toEqual([
+      "Immich MCP (Another App",
+      "Immich MCP (Claude",
     ]);
-    expect(ctx.fake.apiKeys.has(first)).toBe(false);
   });
 
   it("keeps the form open on a wrong password, with the email and never the password", async () => {
@@ -479,6 +548,70 @@ describe("signing in with an Immich email and password", () => {
     expect(html).toContain(`value="${ADA_EMAIL}"`);
     expect(html).not.toContain("wrong password");
     expect(ctx.fake.createdKeys).toHaveLength(0);
+  });
+
+  it("counts simultaneous guesses before Immich answers, so a burst cannot outrun the limit", async () => {
+    const ctx = setup();
+    const { body } = await ctx.register();
+    const { request } = await ctx.openSignIn(body.client_id, challenge);
+    // Twenty at once, each from its own address so only the account limit applies.
+    const statuses = await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        ctx.oauth
+          .routes(
+            new Request(`${PUBLIC}/authorize`, {
+              method: "POST",
+              headers: {
+                "content-type": "application/x-www-form-urlencoded",
+                "x-forwarded-for": `198.51.100.${i}`,
+              },
+              body: new URLSearchParams({
+                request,
+                method: "password",
+                email: ADA_EMAIL,
+                password: `guess-${i}`,
+              }).toString(),
+            }),
+          )
+          .then((response) => response?.status),
+      ),
+    );
+    expect(ctx.fake.callsTo("POST", "/api/auth/login")).toHaveLength(5);
+    expect(statuses.filter((status) => status === 429)).toHaveLength(15);
+  });
+
+  it("does not hold an address Immich will not consider an email against the account", async () => {
+    const ctx = setup();
+    for (let i = 0; i < 6; i++) {
+      const { response } = await submit(ctx, { email: "ada@localhost" });
+      expect(response.status).toBe(400);
+      expect(await response.text()).toContain("did not accept that email address");
+    }
+    expect((await submit(ctx, {})).response.status).toBe(303);
+  });
+
+  it("tells Immich who is signing in, and signs in whatever the email's case", async () => {
+    const ctx = setup();
+    const { body } = await ctx.register();
+    const { request } = await ctx.openSignIn(body.client_id, challenge);
+    const response = await ctx.oauth.routes(
+      new Request(`${PUBLIC}/authorize`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          "x-forwarded-for": "203.0.113.5, 198.51.100.77",
+        },
+        body: new URLSearchParams({
+          request,
+          method: "password",
+          email: "Ada@Example.test",
+          password: ADA_PASSWORD,
+        }).toString(),
+      }),
+    );
+    expect(response?.status).toBe(303);
+    const login = ctx.fake.callsTo("POST", "/api/auth/login")[0];
+    expect(login.headers.get("x-forwarded-for")).toBe("198.51.100.77");
   });
 
   it("makes an account wait after five wrong passwords, without calling Immich again", async () => {

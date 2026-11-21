@@ -88,11 +88,22 @@ authorization server, and signing in means giving it a key.
   now takes the Immich email and password, and `immichLogin.ts` signs in, creates the key with
   exactly the four permissions, and signs out. The password exists in memory for that one call.
   What the client holds is unchanged: the sealed key.
-  - The key is named for the connecting app (`Immich MCP (Claude)`), and a sign-in replaces the
-    key of the same name, so keys do not pile up and another app's key is left alone.
+  - The key is named for the app and its registration (`Immich MCP (Claude · a1b2c3)`). A sign-in
+    creates the new key first and only then removes the key of exactly that name, so a failed
+    sign-in never costs a working connection, and no other registration's key is ever removed:
+    not the same app on a second computer, and not a stranger's client that calls itself
+    "Claude". A client that registers afresh every time leaves keys behind; those are removed
+    once they are older than a sign-in can last (a year).
   - Immich sees every attempt as coming from this server and cannot throttle guesses per caller,
-    so wrong passwords are counted per account here (five in 15 minutes), on top of the
-    per-address budget. It holds back this form only, never Immich's own login.
+    so attempts are counted per account here (five wrong in 15 minutes), on top of the
+    per-address budget. An attempt counts from the moment it is sent, not when Immich answers,
+    or a burst of simultaneous guesses would all pass the check together. It holds back this
+    form only, never Immich's own login. The cost, accepted: anyone who knows an email address
+    can keep that account waiting on this form. Pasting a key is not affected.
+  - The caller's address is passed to Immich as `X-Forwarded-For`, so Immich's log of failed
+    logins names the caller if Immich is set to trust this server as a proxy.
+  - The Immich session is closed when the key work is done, with one retry. If Immich stops
+    answering in between, the session can outlive the request; nobody holds its token.
   - Pasting a key remains for accounts without a password, and
     `IMMICH_MCP_PASSWORD_SIGN_IN=false` removes the password form for an operator who does not
     want the server to touch passwords.

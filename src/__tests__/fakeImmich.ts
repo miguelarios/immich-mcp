@@ -150,7 +150,15 @@ export interface FakeImmich {
   /** Accounts that can sign in with a password: email to password. */
   users: Map<string, string>;
   /** Keys created through `POST /api-keys`, newest last. */
-  createdKeys: Array<{ id: string; name: string; secret: string; permissions: string[] }>;
+  createdKeys: Array<{
+    id: string;
+    name: string;
+    secret: string;
+    permissions: string[];
+    createdAt: string;
+  }>;
+  /** The instant `POST /api-keys` stamps on a new key; tests move it to age keys. */
+  clock: { now: string };
   /** Session tokens that are signed in right now. */
   sessions: Set<string>;
   /** Overrides the response for one endpoint. */
@@ -184,6 +192,7 @@ export function fakeImmich(): FakeImmich {
   const sessions = new Set<string>();
   const createdKeys: FakeImmich["createdKeys"] = [];
   let serial = 0;
+  const clock = { now: "2026-11-21T12:00:00.000Z" };
   const overrides = new Map<string, () => Response | Promise<Response>>();
 
   const route = (
@@ -194,7 +203,12 @@ export function fakeImmich(): FakeImmich {
     headers: Headers,
   ): Response => {
     if (method === "POST" && path === "/api/auth/login") {
-      if (!body?.email || users.get(body.email) !== body.password) {
+      const email = typeof body?.email === "string" ? body.email : "";
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+        return json({ message: ["email must be an email"] }, 400);
+      }
+      // Immich stores and compares emails in lower case.
+      if (users.get(email.toLowerCase()) !== body.password) {
         return json({ message: "Incorrect email or password" }, 401);
       }
       const accessToken = `session-${++serial}`;
@@ -215,20 +229,26 @@ export function fakeImmich(): FakeImmich {
       return json(createdKeys.map(({ secret: _secret, ...rest }) => rest));
     }
     if (method === "POST" && path === "/api/api-keys") {
+      if (!Array.isArray(body?.permissions) || body.permissions.length === 0) {
+        return json({ message: ["permissions must contain at least 1 elements"] }, 400);
+      }
       const created = {
         id: `key-${++serial}`,
         name: body.name,
         permissions: body.permissions,
         secret: `created-secret-${serial}-0000000000`,
+        createdAt: clock.now,
       };
       createdKeys.push(created);
       apiKeys.set(created.secret, created.permissions);
-      return json(created, 201);
+      const { secret, ...apiKey } = created;
+      return json({ ...apiKey, secret, apiKey }, 201);
     }
     const keyId = /^\/api\/api-keys\/([^/]+)$/.exec(path);
     if (method === "DELETE" && keyId && keyId[1] !== "me") {
       const at = createdKeys.findIndex((key) => key.id === keyId[1]);
-      if (at >= 0) apiKeys.delete(createdKeys.splice(at, 1)[0].secret);
+      if (at < 0) return json({ message: "API Key not found" }, 400);
+      apiKeys.delete(createdKeys.splice(at, 1)[0].secret);
       return new Response(null, { status: 204 });
     }
     if (method === "GET" && path === "/api/api-keys/me") {
@@ -310,6 +330,7 @@ export function fakeImmich(): FakeImmich {
     users,
     createdKeys,
     sessions,
+    clock,
     callsTo: (method, path) => calls.filter((c) => c.method === method && c.path === path),
     respond: (method, path, response) => overrides.set(`${method} ${path}`, response),
   };
