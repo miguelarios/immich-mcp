@@ -23,16 +23,22 @@ Run all four before pushing.
   for a missing asset.
 - `src/library/PhotoLibrary.ts` — the workflows: resolves people/album/place names to what Immich
   filters on, turns dates into instants (`dates.ts`), runs the searches and shapes results into
-  `PhotoSummary`. One instance is shared by every MCP session; it caches the album and place lists
-  for five minutes.
+  `PhotoSummary`. It caches the album and place lists for five minutes, so an instance must never
+  serve two different API keys.
 - `src/tools/` — the `ToolDef[]` (`index.ts`) and valibot output schemas (`schemas.ts`).
 - `src/mcp/` — the MCP facade (`tools.ts`: `ToolDef`, `registerTools`, `structured`, `fail`) and the
   Streamable HTTP transport (`http.ts`), vendored from `@miguelarios/pim-core`
   (github.com/miguelarios/pim-agents) with the env vars renamed to `IMMICH_MCP_*`. Keep it in step
-  with upstream rather than letting the two drift.
+  with upstream rather than letting the two drift; the `auth` option is the one addition here.
+- `src/auth/` — opt-in sign-in (`IMMICH_MCP_AUTH=oauth`): `oauth.ts` is the OAuth 2.1 authorization
+  server (discovery, registration, the paste-a-key page, tokens) and the bearer check for `/mcp`;
+  `seal.ts` encrypts client ids and tokens, so nothing is stored; `libraries.ts` keeps one
+  `PhotoLibrary` per API key. The SDK only ships the resource-server half, hence the hand-written
+  authorization server.
 - `src/main.ts` — `createServer(library)` is a factory the HTTP transport calls per request
   (2026-07-28) or per session (2025-era): it must not open connections or install process handlers.
-  `startServer` builds the shared library once.
+  `startServer` builds one shared library, or with sign-in on, a pool the factory picks from by
+  the caller's key.
 
 ## Rules
 
@@ -45,6 +51,8 @@ Run all four before pushing.
   under `applied`. Unknown or ambiguous names fail with candidates rather than guessing.
 - Inputs are hand-written JSON Schema (validated by the SDK before the handler runs); outputs are
   valibot schemas the SDK enforces. Every parameter and output field is camelCase (tested).
+- **Sign-in never handles an Immich password and never stores a key.** Keys are pasted, must be
+  read-only, and travel only inside sealed tokens. Redirect URIs stay on an allowlist.
 - Tool descriptions are written for a model choosing between tools: say when to use it and when to
   use a sibling instead.
 

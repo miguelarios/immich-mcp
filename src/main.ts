@@ -1,9 +1,13 @@
 import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/server";
+import { loadAuthConfig } from "./auth/config.js";
+import { LibraryPool } from "./auth/libraries.js";
+import { apiKeyOf, createOAuthServer } from "./auth/oauth.js";
 import { loadConfig } from "./config.js";
+import { ConfigurationError } from "./errors.js";
 import { ImmichClient } from "./immich/client.js";
 import { PhotoLibrary } from "./library/PhotoLibrary.js";
-import { TOOL_LIST_CACHE_HINT, registerTools, serve } from "./mcp/tools.js";
+import { TOOL_LIST_CACHE_HINT, loadTransportConfig, registerTools, serve } from "./mcp/tools.js";
 import { PHOTO_TOOLS } from "./tools/index.js";
 
 const require = createRequire(import.meta.url);
@@ -36,13 +40,31 @@ export function createServer(library: PhotoLibrary): McpServer {
 }
 
 export async function startServer(): Promise<void> {
-  const config = loadConfig();
-  const library = new PhotoLibrary(new ImmichClient(config), {
-    publicUrl: config.publicUrl,
-    timeZone: config.timeZone,
-  });
+  const auth = loadAuthConfig();
+  const config = loadConfig(process.env, { requireApiKey: !auth });
+  const libraryFor = (apiKey: string) =>
+    new PhotoLibrary(new ImmichClient({ ...config, apiKey }), {
+      publicUrl: config.publicUrl,
+      timeZone: config.timeZone,
+    });
 
-  const handle = await serve(() => createServer(library), { name: "immich-mcp" });
+  let handle: { close: () => Promise<void> };
+  if (auth) {
+    if (loadTransportConfig().kind !== "http") {
+      throw new ConfigurationError("IMMICH_MCP_AUTH=oauth needs IMMICH_MCP_TRANSPORT=http.");
+    }
+    // Every caller brings their own key, and gets a library (and name caches) of their own.
+    const libraries = new LibraryPool(libraryFor);
+    const oauth = createOAuthServer({ config: auth, immich: config });
+    handle = await serve((ctx) => createServer(libraries.for(apiKeyOf(ctx.authInfo))), {
+      name: "immich-mcp",
+      auth: oauth,
+    });
+    console.error(`[immich-mcp] Sign-in is on; clients connect to ${auth.publicUrl}/mcp`);
+  } else {
+    const library = libraryFor(config.apiKey as string);
+    handle = await serve(() => createServer(library), { name: "immich-mcp" });
+  }
 
   const shutdown = async () => {
     await handle.close();

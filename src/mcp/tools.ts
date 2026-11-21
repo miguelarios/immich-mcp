@@ -115,6 +115,7 @@ export function toolError(err: unknown): CallToolResult {
 export const TOOL_LIST_CACHE_HINT = { ttlMs: 3_600_000, cacheScope: "public" } as const;
 
 export {
+  type HttpAuth,
   type HttpHandlerOptions,
   type HttpServerHandle,
   type McpHttpHandler,

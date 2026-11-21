@@ -1,7 +1,7 @@
-import type { ImmichConfig } from "../config.js";
 import { ImmichMcpError, InputError, NotFoundError } from "../errors.js";
 import type {
   Album,
+  ApiKeyInfo,
   Asset,
   ImageBytes,
   MetadataSearchRequest,
@@ -26,14 +26,25 @@ export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
  * MCP session. All calls are reads: the API key may be full-access, but this
  * client only ever issues GETs and the search POSTs (which read).
  */
+export interface ImmichClientConfig {
+  baseUrl: string;
+  apiKey: string;
+  timeoutMs: number;
+}
+
 export class ImmichClient {
   private readonly fetchImpl: Fetch;
 
   constructor(
-    private readonly config: Pick<ImmichConfig, "baseUrl" | "apiKey" | "timeoutMs">,
+    private readonly config: ImmichClientConfig,
     fetchImpl: Fetch = globalThis.fetch,
   ) {
     this.fetchImpl = fetchImpl;
+  }
+
+  /** The key this client calls with: its name and what it is allowed to do. */
+  currentApiKey(): Promise<ApiKeyInfo> {
+    return this.json("GET", "/api-keys/me");
   }
 
   smartSearch(body: SmartSearchRequest): Promise<SearchResponse> {

@@ -64,6 +64,30 @@ services:
       - "127.0.0.1:3000:3000"
 ```
 
+### For a household (sign-in)
+
+With `IMMICH_MCP_AUTH=oauth` the server can face the internet: each person adds the URL to Claude
+(or any MCP client that does OAuth), pastes a read-only Immich API key of their own on the sign-in
+page, and from then on searches only what their Immich account can see.
+
+```yaml
+services:
+  immich-mcp:
+    image: ghcr.io/miguelarios/immich-mcp:0.2.0
+    restart: unless-stopped
+    environment:
+      IMMICH_URL: http://immich-server:2283        # reached privately
+      IMMICH_PUBLIC_URL: https://photos.example.com # for links and the sign-in page
+      IMMICH_MCP_AUTH: oauth
+      IMMICH_MCP_PUBLIC_URL: https://photos-mcp.example.com
+      IMMICH_MCP_SECRET: ${IMMICH_MCP_SECRET:?openssl rand -base64 48}
+      TZ: America/Chicago
+```
+
+Put it behind your TLS reverse proxy on **its own hostname** (OAuth discovery lives at the root of
+the origin), and add `https://photos-mcp.example.com/mcp` as a connector. There is no volume: the
+server stores nothing. See [Security](#security) for what that means.
+
 ### From source (stdio or HTTP)
 
 ```bash
@@ -86,7 +110,7 @@ Other clients: `{"type": "http", "url": "http://127.0.0.1:3000/mcp"}`.
 | Variable | Default | |
 | --- | --- | --- |
 | `IMMICH_URL` | required | Server origin; a trailing `/api` is accepted |
-| `IMMICH_API_KEY` | required | See the permissions above |
+| `IMMICH_API_KEY` | required, unless sign-in is on | See the permissions above |
 | `IMMICH_PUBLIC_URL` | `IMMICH_URL` | Origin for links returned to the user, when the API is reached privately (`http://immich-server:2283`) |
 | `TZ` | `UTC` | Zone bare dates are read in |
 | `IMMICH_TIMEOUT_MS` | `30000` | Per-request timeout |
@@ -94,13 +118,36 @@ Other clients: `{"type": "http", "url": "http://127.0.0.1:3000/mcp"}`.
 | `IMMICH_MCP_HTTP_HOST` | `127.0.0.1` (`0.0.0.0` in the image) | |
 | `IMMICH_MCP_HTTP_PORT` | `3000` | |
 | `IMMICH_MCP_HTTP_ALLOWED_ORIGINS` | none | Browser origins admitted; requests without `Origin` are always allowed |
+| `IMMICH_MCP_AUTH` | `none` | `oauth` turns on sign-in (HTTP only); `IMMICH_API_KEY` must then be unset |
+| `IMMICH_MCP_PUBLIC_URL` | required with `oauth` | The origin clients use, no path; https unless loopback |
+| `IMMICH_MCP_SECRET` | required with `oauth` | 32+ characters; seals client ids and tokens. Changing it signs everyone out |
+| `IMMICH_MCP_OAUTH_REDIRECT_URIS` | none | Extra redirect URIs to admit, comma-separated |
 
 ## Security
 
-**The MCP endpoint does no authentication.** Anyone who can reach the port can search and view
-your whole library with your API key. Bind it to loopback (as above) or a private network, and
-put an OAuth proxy in front before exposing it anywhere else. Browser requests from origins not in
-`IMMICH_MCP_HTTP_ALLOWED_ORIGINS` are refused, which blocks DNS-rebinding attacks from web pages.
+**Without sign-in (the default) the MCP endpoint does no authentication.** Anyone who can reach
+the port can search and view your whole library with your API key. Bind it to loopback or a private
+network. Browser requests from origins not in `IMMICH_MCP_HTTP_ALLOWED_ORIGINS` are refused, which
+blocks DNS-rebinding attacks from web pages.
+
+**With `IMMICH_MCP_AUTH=oauth`** the server is an OAuth 2.1 authorization server for itself
+(discovery, dynamic client registration, PKCE S256, tokens bound to this server), and `/mcp`
+answers only a valid token:
+
+- **It never sees an Immich password.** People sign in to Immich as usual (password or passkey),
+  create an API key there and paste it. A key that can do more than read is refused, as is one
+  missing `asset.read`, `asset.view`, `person.read` or `album.read`.
+- **Only known clients can connect.** Redirect URIs are limited to Claude's callbacks, loopback
+  (desktop and CLI clients) and `IMMICH_MCP_OAUTH_REDIRECT_URIS`, and the sign-in page names the
+  client. Otherwise anyone could register a client and send a family member a link to the real
+  sign-in page.
+- **Nothing is stored.** A token is the person's API key sealed with `IMMICH_MCP_SECRET`
+  (AES-256-GCM), valid for one hour and refreshed for up to 90 days. Keep the secret out of the
+  repository; whoever holds it and a token holds that read-only key.
+- **To disconnect someone, delete their key in Immich.** There is no revocation here: the key
+  stops working in Immich at once, and the client is asked to sign in again at the next refresh.
+- Each person's calls run with their own key, so Immich enforces what they can see, and album and
+  place names are cached per key.
 
 ## Protocol
 

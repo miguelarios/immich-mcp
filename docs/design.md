@@ -65,3 +65,60 @@ other filters in one call.
 
 Smart search ~0.2-0.6 s warm (first call after idle ~6 s while the CLIP model loads), OCR search
 ~0.2 s, metadata search ~0.05 s, OCR lines per asset ~0.04 s, preview ~0.3 MB.
+
+# Design: sign-in for a household (0.2)
+
+## Goal
+
+Run one server next to Immich for the whole family. Each person adds the URL to their MCP client,
+signs in once, and their agent sees what their own Immich account sees.
+
+## The constraint
+
+Immich's API accepts an API key or its own session token, never an OAuth token, and Immich is an
+OIDC client, not a provider. So OAuth can only answer "who is calling"; an Immich API key per
+person still has to answer "what may they see". The server is therefore its own OAuth 2.1
+authorization server, and signing in means giving it a key.
+
+## Decisions
+
+- **Paste a key; no password form.** The page at `/authorize` asks for an Immich API key the person
+  created themselves. The server never handles an Immich password, it works the same for password
+  and passkey accounts, and it will keep working when Immich logins move to an identity provider.
+  The cost is a few clicks in Immich's settings, once per person.
+- **Read-only keys only.** A key is accepted when Immich reports the four permissions the tools
+  need and nothing beyond `*.read`, `*.view` and `*.statistics`. A full-access key is refused, so
+  the worst a leaked token can do is read.
+- **Stateless: sealed tokens, no database.** A client id is its registration, and a token is the
+  API key plus an expiry, each sealed with AES-256-GCM under a key derived per purpose from
+  `IMMICH_MCP_SECRET`. No volume, nothing to back up, and open registration cannot fill a table.
+  Only authorization codes live in memory (60 seconds, single use). The trade: no revocation
+  list and no refresh-token reuse detection. Deleting the key in Immich is the revocation; the
+  refresh, hourly, asks Immich whether the key still stands and ends the session when it does not.
+  An unreachable Immich is not treated as a verdict.
+- **Redirect URIs on an allowlist.** Registration is open (clients register themselves), but only
+  for Claude's callbacks, loopback, and configured extras. With arbitrary redirects, anyone could
+  register a client and send a family member a link to the genuine sign-in page, then collect the
+  code. The page also names the client and where it returns.
+- **One library per key.** `PhotoLibrary` caches album and place names; shared between callers it
+  would resolve one person's album names for another. `LibraryPool` keys libraries by a hash of
+  the API key, and a 2025-era session answers only the caller that opened it.
+- **Its own hostname, no path.** Discovery documents live at the origin's root; under a path on
+  Immich's hostname they would need routes carved out of Immich's own URL space.
+- **Hand-written authorization server.** `@modelcontextprotocol/server` 2.x ships the
+  resource-server half (`requireBearerAuth`, used here) but no authorization server. The routes
+  are small because nothing is stored.
+
+### Rejected
+
+- **Immich email and password form.** A second place where the family types their Immich
+  password, a password-guessing surface that Immich cannot rate-limit per client (every attempt
+  comes from this server), and no way in for passkey-only accounts.
+- **SQLite for clients, codes and tokens.** Needed only for revocation, which Immich already has.
+- **An identity provider in front of `/mcp`** (forward auth). MCP clients call from their own
+  servers and cannot complete an interactive login per request.
+
+## Later
+
+A second factor: Immich passkeys already cover signing in to Immich itself, which is the only
+login in this flow. An identity provider would slot in as a step before the paste page.
