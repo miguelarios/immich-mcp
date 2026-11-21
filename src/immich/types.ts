@@ -148,9 +148,9 @@ export interface SearchFilter {
   type?: { eq?: AssetType; in?: AssetType[] };
   visibility?: { in: AssetVisibility[] };
   isFavorite?: { eq: boolean };
-  city?: { eq: string };
-  state?: { eq: string };
-  country?: { eq: string };
+  city?: { in: string[] };
+  state?: { in: string[] };
+  country?: { in: string[] };
   ocr?: { matches: string };
   description?: { like: string };
   originalFileName?: { like: string };

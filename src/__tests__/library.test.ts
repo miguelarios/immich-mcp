@@ -3,7 +3,7 @@ import { InputError, NotFoundError } from "../errors.js";
 import { ImmichClient } from "../immich/client.js";
 import { PhotoLibrary, matchingLines, ocrText } from "../library/PhotoLibrary.js";
 import { containsPattern, fold } from "../library/text.js";
-import { BASE, IDS, OCR, fakeImmich } from "./fakeImmich.js";
+import { ALBUMS, ASSETS, BASE, IDS, OCR, fakeImmich } from "./fakeImmich.js";
 
 function setup(timeZone = "America/Chicago") {
   const fake = fakeImmich();
@@ -59,6 +59,28 @@ describe("resolvePerson", () => {
     expect(error.message).toContain("list_people");
   });
 
+  it("refuses two people with the same name rather than picking one", async () => {
+    const { library, fake } = setup();
+    fake.respond("GET", "/api/search/person", () =>
+      Response.json([
+        { id: IDS.ada, name: "Ada Lovelace", isHidden: false },
+        { id: IDS.jose, name: "Ada Lovelace", isHidden: false },
+      ]),
+    );
+    await expect(library.resolvePerson("ada lovelace")).rejects.toThrow("matches several people");
+  });
+
+  it("does not accept a sole candidate that only contains the query mid-word", async () => {
+    const { library, fake } = setup();
+    fake.respond("GET", "/api/search/person", () =>
+      Response.json([{ id: IDS.ada, name: "Olivia Example", isHidden: false }]),
+    );
+    const error = await library.resolvePerson("li").catch((e) => e);
+    expect(error).toBeInstanceOf(NotFoundError);
+    expect(error.message).toContain("closest: Olivia Example");
+    await expect(library.resolvePerson("example")).resolves.toMatchObject({ id: IDS.ada });
+  });
+
   it("passes a person id through without a lookup", async () => {
     const { library, fake } = setup();
     await expect(library.resolvePerson(IDS.ada)).resolves.toMatchObject({ id: IDS.ada });
@@ -78,6 +100,14 @@ describe("resolveAlbum and resolvePlace", () => {
     await expect(library.resolveAlbum("Ski")).rejects.toThrow("list_albums");
   });
 
+  it("refuses two albums with the same name", async () => {
+    const { library, fake } = setup();
+    fake.respond("GET", "/api/albums", () =>
+      Response.json([ALBUMS[0], { ...ALBUMS[0], id: IDS.jose }]),
+    );
+    await expect(library.resolveAlbum("beach trip 2024")).rejects.toThrow("Pass the album id");
+  });
+
   it("caches the album list", async () => {
     const { library, fake } = setup();
     await library.resolveAlbum("trip");
@@ -85,12 +115,13 @@ describe("resolveAlbum and resolvePlace", () => {
     expect(fake.callsTo("GET", "/api/albums")).toHaveLength(1);
   });
 
-  it("resolves places to the exact spelling Immich stored", async () => {
+  it("resolves places to every spelling Immich stored for them", async () => {
     const { library } = setup();
-    await expect(library.resolvePlace("city", "ciudad de mexico")).resolves.toBe(
+    await expect(library.resolvePlace("city", "ciudad de méxico")).resolves.toEqual([
       "Ciudad de México",
-    );
-    await expect(library.resolvePlace("city", "ZURICH")).resolves.toBe("Zürich");
+      "Ciudad de Mexico",
+    ]);
+    await expect(library.resolvePlace("city", "ZURICH")).resolves.toEqual(["Zürich"]);
   });
 
   it("suggests close places when there is no exact one", async () => {
@@ -132,9 +163,9 @@ describe("buildFilter", () => {
     expect(filter).toEqual({
       personIds: { all: [IDS.ada, IDS.jose] },
       albumIds: { any: [IDS.trip] },
-      city: { eq: "Playa Example" },
-      state: { eq: "Quintana Roo" },
-      country: { eq: "Mexico" },
+      city: { in: ["Playa Example"] },
+      state: { in: ["Quintana Roo"] },
+      country: { in: ["Mexico"] },
       takenAt: { gte: "2024-06-01T05:00:00.000Z", lt: "2024-07-01T05:00:00.000Z" },
       type: { eq: "VIDEO" },
       isFavorite: { eq: true },
@@ -198,9 +229,11 @@ describe("searches", () => {
     expect(result.photos[0]).not.toHaveProperty("matchedText");
   });
 
-  it("search by text survives one photo's OCR failing", async () => {
+  it("search by text treats a photo with no OCR record as no lines", async () => {
     const { library, fake } = setup();
-    fake.respond("GET", `/api/assets/${IDS.receipt}/ocr`, () => new Response("", { status: 500 }));
+    fake.respond("GET", `/api/assets/${IDS.receipt}/ocr`, () =>
+      Response.json({ message: "Not found or no asset.read access" }, { status: 400 }),
+    );
     const result = await library.searchByText({ text: "receipt", limit: 10, includeText: true });
     expect(result.photos[0].matchedText).toEqual([]);
   });
@@ -281,11 +314,36 @@ describe("summaries and details", () => {
     await expect(library.viewPhoto("../etc", "preview")).rejects.toThrow("not a photo id");
   });
 
-  it("matchingLines falls back to the first lines when no word matches", () => {
+  it("matchingLines returns only lines containing a query word, never filler", () => {
     const lines = OCR[IDS.receipt];
     expect(matchingLines(lines, "bakery")).toEqual(["Corner Bakery"]);
-    expect(matchingLines(lines, "zzz", 2)).toEqual(["Corner Bakery", "Receipt #4411"]);
+    expect(matchingLines(lines, "zzz")).toEqual([]);
     expect(ocrText([])).toBe("");
+  });
+
+  it("get_photo drops tags with no name instead of failing its schema", async () => {
+    const { library, fake } = setup();
+    fake.respond("GET", `/api/assets/${IDS.receipt}`, () =>
+      Response.json({
+        ...ASSETS[IDS.receipt],
+        tags: [
+          { id: "t", name: "" },
+          { id: "u", name: "Kept" },
+        ],
+      }),
+    );
+    expect((await library.getPhoto(IDS.receipt, false)).tags).toEqual(["Kept"]);
+  });
+
+  it("surfaces a permission error from a side lookup instead of reporting no text", async () => {
+    const { library, fake } = setup();
+    fake.respond("GET", `/api/assets/${IDS.receipt}/ocr`, () =>
+      Response.json({ message: "Missing required permission: asset.read" }, { status: 403 }),
+    );
+    await expect(library.getPhoto(IDS.receipt, true)).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(
+      library.searchByText({ text: "receipt", limit: 5, includeText: true }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
   });
 });
 

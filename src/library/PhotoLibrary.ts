@@ -111,15 +111,31 @@ export class PhotoLibrary {
       );
     }
     const wanted = fold(value);
+    const ambiguous = (candidates: PersonRef[]) =>
+      new InputError(
+        `"${value}" matches several people: ${candidates
+          .slice(0, 10)
+          .map((person) => person.name)
+          .join(", ")}. Pass the full name or the person id.`,
+      );
     const exact = matches.filter((person) => fold(person.name) === wanted);
-    if (exact.length >= 1) return pick(exact[0]);
+    if (exact.length === 1) return pick(exact[0]);
+    if (exact.length > 1) throw ambiguous(exact);
     // "Jose" for "José Núñez": a unique match on the first name is what the user meant.
     const byFirst = matches.filter((person) => fold(person.name).split(" ")[0] === wanted);
     if (byFirst.length === 1) return pick(byFirst[0]);
-    if (matches.length === 1) return pick(matches[0]);
-    const names = matches.slice(0, 10).map((person) => person.name);
-    throw new InputError(
-      `"${value}" matches several people: ${names.join(", ")}. Pass the full name or the person id.`,
+    // A sole candidate is accepted only when the query starts one of its words, so
+    // "nunez" finds "José Núñez" but "li" does not silently become "Olivia".
+    const byWord = matches.filter((person) =>
+      fold(person.name)
+        .split(" ")
+        .some((word) => word.startsWith(wanted)),
+    );
+    if (byWord.length === 1) return pick(byWord[0]);
+    if (matches.length > 1 || byWord.length > 1)
+      throw ambiguous(byWord.length > 1 ? byWord : matches);
+    throw new NotFoundError(
+      `No named person matches "${value}" (closest: ${matches[0].name}). Pass the full name or call list_people.`,
     );
   }
 
@@ -133,7 +149,12 @@ export class PhotoLibrary {
     }
     const wanted = fold(value);
     const exact = albums.filter((album) => fold(album.albumName) === wanted);
-    if (exact.length >= 1) return { id: exact[0].id, name: exact[0].albumName };
+    if (exact.length === 1) return { id: exact[0].id, name: exact[0].albumName };
+    if (exact.length > 1) {
+      throw new InputError(
+        `${exact.length} albums are named "${exact[0].albumName}". Pass the album id from list_albums.`,
+      );
+    }
     const partial = albums.filter((album) => fold(album.albumName).includes(wanted));
     if (partial.length === 1) return { id: partial[0].id, name: partial[0].albumName };
     if (partial.length > 1) {
@@ -147,13 +168,15 @@ export class PhotoLibrary {
    * Immich filters places by exact, case-sensitive value, so "cancun" finds
    * nothing when it stored "Cancún". Resolve against the values it actually has.
    */
-  async resolvePlace(kind: "city" | "state" | "country", ref: string): Promise<string> {
+  async resolvePlace(kind: "city" | "state" | "country", ref: string): Promise<string[]> {
     const value = ref.trim();
     if (!value) throw new InputError(`${kind} cannot be empty.`);
     const known = await this.knownPlaces(kind);
     const wanted = fold(value);
-    const exact = known.find((place) => fold(place) === wanted);
-    if (exact) return exact;
+    // Every stored spelling that folds equal is searched: geocoding and EXIF can
+    // store both "Cancún" and "Cancun" for the same place.
+    const exact = known.filter((place) => fold(place) === wanted);
+    if (exact.length > 0) return exact;
     const close = known.filter((place) => fold(place).includes(wanted)).slice(0, 10);
     const hint = close.length > 0 ? ` Close matches: ${close.join(", ")}.` : "";
     throw new NotFoundError(`No photos have ${kind} "${value}".${hint}`);
@@ -210,16 +233,16 @@ export class PhotoLibrary {
       applied.album = album;
     }
     if (city) {
-      filter.city = { eq: city };
-      applied.city = city;
+      filter.city = { in: city };
+      applied.city = city.join(" / ");
     }
     if (state) {
-      filter.state = { eq: state };
-      applied.state = state;
+      filter.state = { in: state };
+      applied.state = state.join(" / ");
     }
     if (country) {
-      filter.country = { eq: country };
-      applied.country = country;
+      filter.country = { in: country };
+      applied.country = country.join(" / ");
     }
 
     const taken = takenRange(filters.takenFrom, filters.takenTo, this.options.timeZone);
@@ -295,7 +318,7 @@ export class PhotoLibrary {
     const photos = page.items.map((asset) => this.summarize(asset));
     if (args.includeText) {
       const lines = await mapLimit(page.items, OCR_CONCURRENCY, (asset) =>
-        this.client.getAssetOcr(asset.id).catch(() => [] as OcrLine[]),
+        this.client.getAssetOcr(asset.id).catch(onlyNotFound([] as OcrLine[])),
       );
       photos.forEach((photo, index) => {
         (photo as PhotoSummary & { matchedText?: string[] }).matchedText = matchingLines(
@@ -350,8 +373,8 @@ export class PhotoLibrary {
     if (!isUuid(id)) throw new InputError(`"${id}" is not a photo id (a UUID from a search).`);
     const [asset, albums, ocr] = await Promise.all([
       this.client.getAsset(id),
-      this.client.getAlbumsForAsset(id).catch(() => [] as Album[]),
-      includeText ? this.client.getAssetOcr(id).catch(() => [] as OcrLine[]) : undefined,
+      this.client.getAlbumsForAsset(id).catch(onlyNotFound([] as Album[])),
+      includeText ? this.client.getAssetOcr(id).catch(onlyNotFound([] as OcrLine[])) : undefined,
     ]);
     const exif = asset.exifInfo ?? {};
     const camera = [exif.make, exif.model].filter(Boolean).join(" ") || undefined;
@@ -373,7 +396,9 @@ export class PhotoLibrary {
       ...(asset.originalMimeType ? { mimeType: asset.originalMimeType } : {}),
       ...(typeof exif.rating === "number" ? { rating: exif.rating } : {}),
       albums: albums.map((album) => album.albumName),
-      tags: (asset.tags ?? []).map((tag) => tag.value ?? tag.name),
+      tags: (asset.tags ?? [])
+        .map((tag) => tag.value || tag.name)
+        .filter((tag): tag is string => Boolean(tag)),
       isArchived: asset.visibility === "archive",
       ...(ocr ? { text: ocrText(ocr) } : {}),
     };
@@ -454,6 +479,18 @@ export class PhotoLibrary {
   }
 }
 
+/**
+ * For side lookups (OCR lines, album membership): a photo with none answers
+ * not-found, which means "empty". Anything else (a revoked key, a missing
+ * permission, a timeout) must surface rather than read as "no text".
+ */
+function onlyNotFound<T>(fallback: T): (err: unknown) => T {
+  return (err) => {
+    if (err instanceof NotFoundError) return fallback;
+    throw err;
+  };
+}
+
 function pick(person: PersonRef): { id: string; name: string } {
   return { id: person.id, name: person.name };
 }
@@ -485,7 +522,11 @@ export function ocrText(lines: OcrLine[]): string {
     .join("\n");
 }
 
-/** The OCR lines that contain a word of the query, so the model sees why each photo matched. */
+/**
+ * The OCR lines that contain a word of the query, so the model sees why each
+ * photo matched. Empty when Immich matched fuzzily and no line contains a
+ * query word verbatim; unrelated lines would read as false evidence.
+ */
 export function matchingLines(lines: OcrLine[], query: string, max = 5): string[] {
   const words = fold(query)
     .split(/[^\p{L}\p{N}]+/u)
@@ -495,7 +536,7 @@ export function matchingLines(lines: OcrLine[], query: string, max = 5): string[
     const folded = fold(line);
     return words.some((word) => folded.includes(word));
   });
-  return (hits.length > 0 ? hits : ordered).slice(0, max);
+  return hits.slice(0, max);
 }
 
 async function mapLimit<T, R>(

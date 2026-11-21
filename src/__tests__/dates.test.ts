@@ -61,7 +61,7 @@ describe("takenRange", () => {
     });
   });
 
-  it.each(["June 2024", "2024-13", "2024-02-30", "24-06-01", "2024/06/01", "yesterday"])(
+  it.each(["June 2024", "2024-13", "2024-02-30", "24-06-01", "2024/06/01", "yesterday", "0024"])(
     "rejects %s with a hint at the accepted forms",
     (value) => {
       expect(() => takenRange(value, undefined, "UTC")).toThrow(InputError);

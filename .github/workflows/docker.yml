@@ -114,9 +114,10 @@ jobs:
         env:
           TAGS: ${{ steps.meta.outputs.tags }}
           DIGEST: ${{ steps.build.outputs.digest }}
+          VERSION: ${{ inputs.version }}
         run: |
           {
-            echo "### immich-mcp ${{ inputs.version }}"
+            echo "### immich-mcp ${VERSION}"
             echo
             echo "Digest: \`${DIGEST}\`"
             echo

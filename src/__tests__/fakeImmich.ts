@@ -127,7 +127,7 @@ export const ALBUMS: Album[] = [
 ];
 
 export const PLACES: Record<string, string[]> = {
-  city: ["Playa Example", "Ciudad de México", "Zürich"],
+  city: ["Playa Example", "Ciudad de México", "Ciudad de Mexico", "Zürich"],
   state: ["Quintana Roo", "Texas"],
   country: ["Mexico", "Switzerland", "United States"],
 };

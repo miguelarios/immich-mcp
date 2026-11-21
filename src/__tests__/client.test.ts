@@ -121,6 +121,35 @@ describe("ImmichClient", () => {
     expect(fake.calls[0].headers.get("accept")).toBe("image/*");
   });
 
+  it("refuses a response that is not an image", async () => {
+    const fake = fakeImmich();
+    fake.respond(
+      "GET",
+      `/api/assets/${IDS.beach}/thumbnail`,
+      () => new Response("<html>login</html>", { headers: { "content-type": "text/html" } }),
+    );
+    await expect(make(fake.fetch).thumbnail(IDS.beach, "preview")).rejects.toThrow(/not an image/);
+  });
+
+  it("stops reading a chunked image as soon as it passes the cap", async () => {
+    const fake = fakeImmich();
+    let pulled = 0;
+    const chunk = new Uint8Array(1024 * 1024);
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled++;
+        controller.enqueue(chunk);
+      },
+    });
+    fake.respond(
+      "GET",
+      `/api/assets/${IDS.beach}/thumbnail`,
+      () => new Response(body, { headers: { "content-type": "image/jpeg" } }),
+    );
+    await expect(make(fake.fetch).thumbnail(IDS.beach, "preview")).rejects.toThrow(/byte limit/);
+    expect(pulled).toBeLessThanOrEqual(8);
+  });
+
   it("refuses an image over the size cap, by header or by body", async () => {
     const fake = fakeImmich();
     const path = `/api/assets/${IDS.beach}/thumbnail`;

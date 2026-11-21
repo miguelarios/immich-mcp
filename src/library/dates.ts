@@ -61,6 +61,7 @@ function parsePeriod(
   const match = PERIOD.exec(value);
   if (!match) return null;
   const year = Number(match[1]);
+  if (year < 1000) return null;
   if (match[2] === undefined) return { start: [year, 1, 1], next: [year + 1, 1, 1] };
   const month = Number(match[2]);
   if (month < 1 || month > 12) return null;

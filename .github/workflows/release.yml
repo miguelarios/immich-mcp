@@ -25,6 +25,9 @@ jobs:
     outputs:
       version: ${{ steps.scan.outputs.version }}
       release: ${{ steps.scan.outputs.release }}
+      # The commit whose package.json was read, so the tag lands on it even if
+      # another commit reaches main before the tag job starts.
+      sha: ${{ steps.scan.outputs.sha }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -51,6 +54,7 @@ jobs:
             OLD=""
           fi
           echo "version=$NEW" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           if git rev-parse -q --verify "refs/tags/v${NEW}" >/dev/null && [ "$EVENT" != "workflow_dispatch" ]; then
             echo "::notice::v${NEW} is already tagged"
             echo "release=false" >> "$GITHUB_OUTPUT"
@@ -70,10 +74,13 @@ jobs:
       contents: write # push the tag, create the Release
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.detect.outputs.sha }}
 
       - name: Tag and release
         env:
           VERSION: ${{ needs.detect.outputs.version }}
+          SHA: ${{ needs.detect.outputs.sha }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -100,7 +107,7 @@ jobs:
             MSG="$(mktemp)"
             printf 'immich-mcp %s\n\n' "$VERSION" > "$MSG"
             cat "$NOTES" >> "$MSG"
-            git tag -a "$TAG" -F "$MSG"
+            git tag -a "$TAG" "$SHA" -F "$MSG"
             git push origin "$TAG"
           fi
 
@@ -109,7 +116,7 @@ jobs:
           else
             PRERELEASE=""
             [[ "$VERSION" == *-* ]] && PRERELEASE="--prerelease"
-            gh release create "$TAG" --title "immich-mcp ${VERSION}" --notes-file "$NOTES" $PRERELEASE
+            gh release create "$TAG" --verify-tag --title "immich-mcp ${VERSION}" --notes-file "$NOTES" $PRERELEASE
           fi
 
   image:

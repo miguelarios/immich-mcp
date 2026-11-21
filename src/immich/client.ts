@@ -81,22 +81,28 @@ export class ImmichClient {
       undefined,
       "image/*",
     );
+    const mimeType = (response.headers.get("content-type") ?? "")
+      .split(";")[0]
+      .trim()
+      .toLowerCase();
+    if (!mimeType.startsWith("image/")) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new ImmichMcpError(
+        "UPSTREAM_ERROR",
+        `Immich returned "${mimeType || "no content type"}" for the ${size} image, not an image.`,
+      );
+    }
+    const tooBig = (bytes: number) =>
+      new ImmichMcpError(
+        "UPSTREAM_ERROR",
+        `The ${size} image is over the ${MAX_IMAGE_BYTES}-byte limit (${bytes}+ bytes).`,
+      );
     const declared = Number(response.headers.get("content-length") ?? "0");
     if (declared > MAX_IMAGE_BYTES) {
-      throw new ImmichMcpError(
-        "UPSTREAM_ERROR",
-        `The ${size} image is ${declared} bytes, over the ${MAX_IMAGE_BYTES}-byte limit.`,
-      );
+      await response.body?.cancel().catch(() => undefined);
+      throw tooBig(declared);
     }
-    const data = new Uint8Array(await response.arrayBuffer());
-    if (data.byteLength > MAX_IMAGE_BYTES) {
-      throw new ImmichMcpError(
-        "UPSTREAM_ERROR",
-        `The ${size} image is ${data.byteLength} bytes, over the ${MAX_IMAGE_BYTES}-byte limit.`,
-      );
-    }
-    const mimeType = (response.headers.get("content-type") ?? "image/jpeg").split(";")[0].trim();
-    return { mimeType, data };
+    return { mimeType, data: await readCapped(response, MAX_IMAGE_BYTES, tooBig) };
   }
 
   private async json<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -139,6 +145,39 @@ export class ImmichClient {
     if (response.ok) return response;
     throw await toHttpError(response);
   }
+}
+
+/**
+ * Reads a body with a running byte count, aborting as soon as it passes `max`.
+ * The Content-Length check alone does not bound memory: a chunked response has
+ * none, and `arrayBuffer()` would buffer all of it before any check ran.
+ */
+async function readCapped(
+  response: Response,
+  max: number,
+  tooBig: (bytes: number) => Error,
+): Promise<Uint8Array> {
+  if (!response.body) return new Uint8Array(await response.arrayBuffer());
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > max) {
+      await reader.cancel().catch(() => undefined);
+      throw tooBig(total);
+    }
+    chunks.push(value);
+  }
+  const data = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    data.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return data;
 }
 
 async function upstreamMessage(response: Response): Promise<string> {
