@@ -4,7 +4,14 @@
 #
 # Two stages: the first installs every dependency and compiles TypeScript, the
 # second carries only the compiled server and its production dependencies.
-FROM node:22-alpine AS build
+#
+# The build stage always runs on the builder's own architecture
+# (BUILDPLATFORM), never under emulation: Node under QEMU has crashed in
+# `npm ci` and hung the arm64 release build. That is only correct while what it
+# hands over is architecture-neutral, which it is: compiled JavaScript and
+# dependencies with no native code. A dependency with a native addon would
+# need this stage built per target again.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --no-fund --no-audit
@@ -12,6 +19,8 @@ COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
 RUN npm run build && npm prune --omit=dev --no-fund --no-audit
 
+# The runtime stage is built per target platform. It only copies files, so
+# nothing in it executes under emulation either.
 FROM node:22-alpine
 ARG VERSION=dev
 LABEL org.opencontainers.image.title="immich-mcp" \
