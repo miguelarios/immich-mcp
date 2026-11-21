@@ -87,19 +87,34 @@ authorization server, and signing in means giving it a key.
   and passkey accounts, and it will keep working when Immich logins move to an identity provider.
   The cost is a few clicks in Immich's settings, once per person.
 - **Read-only keys only.** A key is accepted when Immich reports the four permissions the tools
-  need and nothing beyond `*.read`, `*.view` and `*.statistics`. A full-access key is refused, so
-  the worst a leaked token can do is read.
+  need and nothing outside a short list of photo-library reads (statistics, faces, map, memories,
+  stacks, tags, timeline). A full-access key is refused, and so is one that can read sessions,
+  API keys or shared links, so the worst a leaked token can do is read photos.
 - **Stateless: sealed tokens, no database.** A client id is its registration, and a token is the
   API key plus an expiry, each sealed with AES-256-GCM under a key derived per purpose from
   `IMMICH_MCP_SECRET`. No volume, nothing to back up, and open registration cannot fill a table.
   Only authorization codes live in memory (60 seconds, single use). The trade: no revocation
   list and no refresh-token reuse detection. Deleting the key in Immich is the revocation; the
   refresh, hourly, asks Immich whether the key still stands and ends the session when it does not.
-  An unreachable Immich is not treated as a verdict.
+  An unreachable Immich is not treated as a verdict. Photo calls stop at once, since Immich
+  rejects the key; only names cached in the last five minutes outlive it. A sign-in also ends
+  after a year whatever happens, so a stolen refresh token cannot be renewed forever.
+- **The secret is as sensitive as every key.** Whoever has `IMMICH_MCP_SECRET` and a token can
+  open the token. Anyone with a token can also test guesses of the secret offline, so startup
+  refuses a short or repetitive one.
 - **Redirect URIs on an allowlist.** Registration is open (clients register themselves), but only
   for Claude's callbacks, loopback, and configured extras. With arbitrary redirects, anyone could
   register a client and send a family member a link to the genuine sign-in page, then collect the
-  code. The page also names the client and where it returns.
+  code. The page shows where it returns, and the client's name only as what the app calls itself,
+  since anyone can register any name.
+- **What the allowlist cannot stop.** Someone can start connecting in their own Claude account
+  and send the resulting link to a family member; the page is genuine and returns to Claude. The
+  client's `state` check is the defence against that, and it is the client's, not ours. The page
+  therefore says to continue only if you started this yourself, just now.
+- **Key checks are budgeted per address and in total.** Each one calls Immich. Behind the reverse
+  proxy the caller's address is the last `X-Forwarded-For` entry, so one address cannot use up
+  the budget for everyone; text that is not key-shaped is refused without a call. The reverse
+  proxy should rate-limit `/authorize`, `/token` and `/register` as well.
 - **One library per key.** `PhotoLibrary` caches album and place names; shared between callers it
   would resolve one person's album names for another. `LibraryPool` keys libraries by a hash of
   the API key, and a 2025-era session answers only the caller that opened it.

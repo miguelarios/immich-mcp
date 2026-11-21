@@ -138,14 +138,20 @@ answers only a valid token:
   create an API key there and paste it. A key that can do more than read is refused, as is one
   missing `asset.read`, `asset.view`, `person.read` or `album.read`.
 - **Only known clients can connect.** Redirect URIs are limited to Claude's callbacks, loopback
-  (desktop and CLI clients) and `IMMICH_MCP_OAUTH_REDIRECT_URIS`, and the sign-in page names the
-  client. Otherwise anyone could register a client and send a family member a link to the real
-  sign-in page.
+  (desktop and CLI clients) and `IMMICH_MCP_OAUTH_REDIRECT_URIS`. Otherwise anyone could register
+  a client and send a family member a link to the real sign-in page. Another hosted client is
+  refused at registration with `invalid_redirect_uri` until its callback is added there.
+- **Tell the family: only paste a key into a page you opened yourself**, from your own app, just
+  now. A link to the sign-in page sent by someone else connects *their* app to your photos.
 - **Nothing is stored.** A token is the person's API key sealed with `IMMICH_MCP_SECRET`
-  (AES-256-GCM), valid for one hour and refreshed for up to 90 days. Keep the secret out of the
-  repository; whoever holds it and a token holds that read-only key.
+  (AES-256-GCM), valid for one hour and refreshed for up to 90 days at a time; after a year the
+  key is pasted again. Keep the secret out of the repository and make it random
+  (`openssl rand -base64 48`); whoever holds it and a token holds that read-only key.
 - **To disconnect someone, delete their key in Immich.** There is no revocation here: the key
   stops working in Immich at once, and the client is asked to sign in again at the next refresh.
+- **Run it behind a reverse proxy that sets `X-Forwarded-For`** and rate-limits `/authorize`,
+  `/token` and `/register`. Key checks are budgeted per client address (10 a minute) and in total
+  (60 a minute); without a proxy only the total applies.
 - Each person's calls run with their own key, so Immich enforces what they can see, and album and
   place names are cached per key.
 

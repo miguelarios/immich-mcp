@@ -18,7 +18,7 @@ import { createHttpHandler, serveHttp } from "../mcp/tools.js";
 import { BASE, READ_PERMISSIONS, fakeImmich } from "./fakeImmich.js";
 
 const PUBLIC = "http://localhost:3000";
-const SECRET = "test-secret-test-secret-test-secret-0123";
+const SECRET = "0123456789abcdefghijklmnopqrstuvwxyzABCD";
 const CLAUDE = "https://claude.ai/api/mcp/auth_callback";
 const ADA_KEY = "ada-key-0000000000000000";
 const JOSE_KEY = "jose-key-000000000000000";
@@ -183,6 +183,7 @@ describe("client registration", () => {
     [[CLAUDE, "https://evil.example/callback"]],
     [["https://claude.ai.evil.example/api/mcp/auth_callback"]],
     [["http://example.test/callback"]],
+    [["http://user@localhost:8080/callback"]],
     [[]],
   ])("refuses redirect URIs %j", async (uris) => {
     const { register } = setup();
@@ -258,12 +259,18 @@ describe("the sign-in page", () => {
       [] as string[] | undefined,
       "did not accept",
     ],
-    ["a full-access key", "all-key-0000000000000", ["all"], "can do more than read (all)"],
+    ["a full-access key", "all-key-0000000000000", ["all"], "allows more than this needs (all)"],
     [
       "a key that can also delete",
       "write-key-00000000000",
       [...READ_PERMISSIONS, "asset.delete"],
-      "can do more than read (asset.delete)",
+      "allows more than this needs (asset.delete)",
+    ],
+    [
+      "a key that can read sessions",
+      "nosy-key-000000000000",
+      [...READ_PERMISSIONS, "session.read"],
+      "allows more than this needs (session.read)",
     ],
     [
       "a key missing a permission",
@@ -284,6 +291,67 @@ describe("the sign-in page", () => {
     expect(html).toContain(message);
     expect(html).toContain('name="request"');
     expect(html).not.toContain(key);
+  });
+
+  it("accepts the form as a browser sends it, and only from this page", async () => {
+    const { register, openSignIn, oauth } = setup();
+    const { body } = await register();
+    const submit = async (headers: Record<string, string>) => {
+      const { request } = await openSignIn(body.client_id, challenge);
+      const response = await oauth.routes(
+        new Request(`${PUBLIC}/authorize`, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded", ...headers },
+          body: new URLSearchParams({ request, api_key: ADA_KEY }).toString(),
+        }),
+      );
+      return response?.status;
+    };
+    expect(await submit({ origin: PUBLIC })).toBe(303);
+    // A privacy mode or referrer policy can blank the origin; Sec-Fetch-Site still vouches for it.
+    expect(await submit({ origin: "null", "sec-fetch-site": "same-origin" })).toBe(303);
+    expect(await submit({ origin: "null" })).toBe(403);
+    expect(await submit({ origin: "null", "sec-fetch-site": "cross-site" })).toBe(403);
+    expect(await submit({ origin: "https://evil.example", "sec-fetch-site": "same-origin" })).toBe(
+      403,
+    );
+  });
+
+  it("does not let one address use up everyone's attempts", async () => {
+    const { fake, register, openSignIn, oauth } = setup();
+    const { body } = await register();
+    const { request } = await openSignIn(body.client_id, challenge);
+    const attempt = async (address: string, key: string) => {
+      const response = await oauth.routes(
+        new Request(`${PUBLIC}/authorize`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/x-www-form-urlencoded",
+            // The proxy appends the address it saw; what comes before is the caller's claim.
+            "x-forwarded-for": `203.0.113.99, ${address}`,
+          },
+          body: new URLSearchParams({ request, api_key: key }).toString(),
+        }),
+      );
+      return response?.status;
+    };
+    for (let i = 0; i < 10; i++)
+      expect(await attempt("198.51.100.7", "wrong-key-00000000")).toBe(400);
+    expect(await attempt("198.51.100.7", "wrong-key-00000000")).toBe(429);
+    expect(await attempt("198.51.100.7", ADA_KEY)).toBe(429);
+    // Someone else still gets in, and junk that is not key-shaped never reaches Immich.
+    expect(await attempt("198.51.100.8", ADA_KEY)).toBe(303);
+    const before = fake.callsTo("GET", "/api/api-keys/me").length;
+    expect(await attempt("198.51.100.9", "x y")).toBe(400);
+    expect(fake.callsTo("GET", "/api/api-keys/me")).toHaveLength(before);
+  });
+
+  it("warns against links from someone else and does not vouch for the app's name", async () => {
+    const { register, openSignIn } = setup();
+    const { body } = await register([CLAUDE], "Claude (official)");
+    const { html } = await openSignIn(body.client_id, challenge);
+    expect(html).toContain("An app that calls itself <strong>Claude (official)</strong>");
+    expect(html).toContain("Only continue if you started this yourself");
   });
 
   it("refuses a form posted from another site, and an expired page", async () => {
@@ -395,6 +463,26 @@ describe("tokens", () => {
     expect(gone.status).toBe(400);
     expect(((await gone.json()) as any).error).toBe("invalid_grant");
   });
+
+  it("ends a sign-in after a year however often it was refreshed", async () => {
+    const { signIn, postForm, clock } = setup();
+    const { tokens, clientId } = await signIn(ADA_KEY);
+    let refreshToken = tokens.refresh_token as string;
+    const refresh = () =>
+      postForm("/token", {
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+        client_id: clientId,
+      });
+    for (let month = 0; month < 6; month++) {
+      clock.ms += 60 * 24 * 3600_000;
+      const response = await refresh();
+      expect(response.status).toBe(200);
+      refreshToken = ((await response.json()) as any).refresh_token;
+    }
+    clock.ms += 10 * 24 * 3600_000;
+    expect((await refresh()).status).toBe(400);
+  });
 });
 
 describe("two people connected at once", () => {
@@ -456,6 +544,26 @@ describe("two people connected at once", () => {
     expect(stolen.status).toBe(404);
     const own = await postJson("/mcp", list, { ...headers, authorization: `Bearer ${ada}` });
     expect(own.status).toBe(200);
+  });
+
+  it("keeps one caller to twenty 2025-era sessions, closing the oldest", async () => {
+    const { signIn, postJson } = setup();
+    const ada = (await signIn(ADA_KEY)).tokens.access_token;
+    const headers = { ...MCP_HEADERS, authorization: `Bearer ${ada}` };
+    const ids: string[] = [];
+    for (let i = 0; i < 21; i++) {
+      const opened = await postJson("/mcp", INITIALIZE, headers);
+      ids.push(opened.headers.get("mcp-session-id") ?? "");
+    }
+    const list = { jsonrpc: "2.0", id: 2, method: "tools/list" };
+    const use = (id: string) =>
+      postJson("/mcp", list, {
+        ...headers,
+        "mcp-session-id": id,
+        "mcp-protocol-version": "2025-06-18",
+      });
+    expect((await use(ids[0])).status).toBe(404);
+    expect((await use(ids[20])).status).toBe(200);
   });
 });
 
@@ -521,6 +629,8 @@ describe("loadAuthConfig", () => {
     [{ IMMICH_MCP_AUTH: "basic" }, 'must be "none" or "oauth"'],
     [{ IMMICH_MCP_AUTH: "oauth" }, "IMMICH_MCP_PUBLIC_URL, IMMICH_MCP_SECRET"],
     [{ ...oauth, IMMICH_MCP_SECRET: "short" }, "at least 32"],
+    [{ ...oauth, IMMICH_MCP_SECRET: "a".repeat(40) }, "random characters"],
+    [{ ...oauth, IMMICH_MCP_OAUTH_REDIRECT_URIS: "http://agent.example.test/cb" }, "plain http"],
     [{ ...oauth, IMMICH_MCP_PUBLIC_URL: "http://photos-mcp.example.test" }, "must use https"],
     [{ ...oauth, IMMICH_MCP_PUBLIC_URL: "https://example.test/mcp" }, "without a path"],
     [{ ...oauth, IMMICH_API_KEY: "k" }, "Unset IMMICH_API_KEY"],

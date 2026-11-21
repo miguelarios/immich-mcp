@@ -67,8 +67,11 @@ export function loadAuthConfig(env: Env = process.env): AuthConfig | undefined {
   if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHost(url.hostname))) {
     throw new ConfigurationError("IMMICH_MCP_PUBLIC_URL must use https (http only on loopback).");
   }
-  if ((secret as string).length < 32) {
-    throw new ConfigurationError("IMMICH_MCP_SECRET must be at least 32 characters.");
+  // Anyone holding a token can test guesses of the secret offline, so it has to be random.
+  if ((secret as string).length < 32 || new Set(secret as string).size < 16) {
+    throw new ConfigurationError(
+      "IMMICH_MCP_SECRET must be at least 32 random characters, e.g. from: openssl rand -base64 48",
+    );
   }
 
   const redirectUris = (env.IMMICH_MCP_OAUTH_REDIRECT_URIS || "")
@@ -76,8 +79,15 @@ export function loadAuthConfig(env: Env = process.env): AuthConfig | undefined {
     .map((uri) => uri.trim())
     .filter(Boolean);
   for (const uri of redirectUris) {
-    if (!URL.canParse(uri)) {
+    const parsed = URL.canParse(uri) ? new URL(uri) : undefined;
+    if (!parsed || parsed.hash || parsed.username || parsed.password) {
       throw new ConfigurationError(`IMMICH_MCP_OAUTH_REDIRECT_URIS has an invalid URI: "${uri}"`);
+    }
+    // http only to loopback, which is admitted anyway; a custom scheme (an app's own) is fine.
+    if (parsed.protocol === "http:" && !isLoopbackHost(parsed.hostname)) {
+      throw new ConfigurationError(
+        `IMMICH_MCP_OAUTH_REDIRECT_URIS must not use plain http: "${uri}"`,
+      );
     }
   }
 

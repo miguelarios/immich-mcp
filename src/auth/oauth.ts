@@ -28,11 +28,17 @@ import { Sealer, sha256 } from "./seal.js";
 
 const ACCESS_TTL_S = 60 * 60;
 const REFRESH_TTL_S = 90 * 24 * 60 * 60;
+/** However often it is refreshed, a sign-in ends after this long and the key is pasted again. */
+const SIGN_IN_MAX_AGE_S = 365 * 24 * 60 * 60;
 const CODE_TTL_S = 60;
 const SIGN_IN_TTL_S = 10 * 60;
 const MAX_PENDING_CODES = 1000;
-/** Key checks per minute across all callers: each one is a call to Immich. */
-const MAX_KEY_CHECKS_PER_MINUTE = 30;
+/**
+ * Key checks per minute: each one is a call to Immich. The per-address budget
+ * is what stops one caller from using up everyone's; the total protects Immich.
+ */
+const MAX_KEY_CHECKS_PER_MINUTE = 60;
+const MAX_KEY_CHECKS_PER_ADDRESS = 10;
 const MAX_BODY_BYTES = 16 * 1024;
 
 const SCOPE = "photos.read";
@@ -40,8 +46,23 @@ const CLAUDE_REDIRECT_URIS = [
   "https://claude.ai/api/mcp/auth_callback",
   "https://claude.com/api/mcp/auth_callback",
 ];
-/** A key may hold any of these on top of the required ones; anything else can change the library. */
-const READ_ONLY_PERMISSION = /\.(read|view|statistics)$/;
+/**
+ * What a key may hold on top of the required permissions: reads of the photo
+ * library only. Reads of sessions, API keys or shared links are left out on
+ * purpose, since a token carries the key.
+ */
+const ACCEPTED_PERMISSIONS = new Set([
+  ...REQUIRED_PERMISSIONS,
+  "asset.statistics",
+  "album.statistics",
+  "person.statistics",
+  "face.read",
+  "map.read",
+  "memory.read",
+  "stack.read",
+  "tag.read",
+  "timeline.read",
+]);
 
 interface ClientRecord {
   /** Registered redirect URIs. */
@@ -69,10 +90,15 @@ interface PendingCode {
   exp: number;
 }
 
-interface TokenPayload {
+interface Grant {
   /** The Immich API key. */
   k: string;
   ci: string;
+  /** When the key was pasted; carried through every refresh. */
+  iat: number;
+}
+
+interface TokenPayload extends Grant {
   exp: number;
 }
 
@@ -129,6 +155,17 @@ async function readBody(request: Request): Promise<string | undefined> {
     chunks.push(value);
   }
   return Buffer.concat(chunks).toString("utf8");
+}
+
+/**
+ * Who is asking, for rate limiting only. Behind a reverse proxy the last
+ * X-Forwarded-For entry is the address the proxy saw, which a caller cannot
+ * choose; earlier entries are whatever the caller sent. Without a proxy the
+ * header is the caller's to invent, and the total budget is the only limit.
+ */
+function clientAddress(request: Request): string {
+  const forwarded = request.headers.get("x-forwarded-for");
+  return forwarded?.split(",").pop()?.trim() || "direct";
 }
 
 function withoutTrailingSlash(value: string): string {
@@ -196,7 +233,7 @@ export function createOAuthServer(options: OAuthServerOptions): OAuthServer {
 
   const redirectAllowed = (uri: string): boolean => {
     const url = parseUrl(uri);
-    if (!url || url.hash) return false;
+    if (!url || url.hash || url.username || url.password) return false;
     return (
       isLoopbackRedirect(url) ||
       CLAUDE_REDIRECT_URIS.includes(uri) ||
@@ -210,20 +247,24 @@ export function createOAuthServer(options: OAuthServerOptions): OAuthServer {
     for (const [id, code] of codes) if (code.exp <= at) codes.delete(id);
   };
 
-  let keyChecks: number[] = [];
-  const keyCheckAllowed = (): boolean => {
+  let keyChecks: Array<{ at: number; address: string }> = [];
+  const keyCheckAllowed = (address: string): boolean => {
     const cutoff = now() - 60_000;
-    keyChecks = keyChecks.filter((at) => at > cutoff);
+    keyChecks = keyChecks.filter((check) => check.at > cutoff);
     if (keyChecks.length >= MAX_KEY_CHECKS_PER_MINUTE) return false;
-    keyChecks.push(now());
+    const mine = keyChecks.filter((check) => check.address === address).length;
+    if (mine >= MAX_KEY_CHECKS_PER_ADDRESS) return false;
+    keyChecks.push({ at: now(), address });
     return true;
   };
+
+  const looksLikeKey = (apiKey: string) => /^[\x21-\x7e]{8,200}$/.test(apiKey);
 
   /** Asks Immich about a key. `undefined` means it is a usable read-only key. */
   const keyProblem = async (
     apiKey: string,
   ): Promise<{ kind: "rejected" | "unreachable"; message: string } | undefined> => {
-    if (!/^[\x21-\x7e]{8,200}$/.test(apiKey)) {
+    if (!looksLikeKey(apiKey)) {
       return { kind: "rejected", message: "That does not look like an Immich API key." };
     }
     let permissions: string[];
@@ -239,12 +280,12 @@ export function createOAuthServer(options: OAuthServerOptions): OAuthServer {
       }
       return { kind: "unreachable", message: "Could not reach Immich. Try again in a moment." };
     }
-    const excess = permissions.filter((p) => !READ_ONLY_PERMISSION.test(p));
+    const excess = permissions.filter((p) => !ACCEPTED_PERMISSIONS.has(p));
     if (excess.length > 0) {
       const shown = excess.slice(0, 5).join(", ") + (excess.length > 5 ? ", …" : "");
       return {
         kind: "rejected",
-        message: `That key can do more than read (${shown}). Create one with only: ${REQUIRED_PERMISSIONS.join(", ")}.`,
+        message: `That key allows more than this needs (${shown}). Create one with only: ${REQUIRED_PERMISSIONS.join(", ")}.`,
       };
     }
     const missing = REQUIRED_PERMISSIONS.filter((p) => !permissions.includes(p));
@@ -257,13 +298,17 @@ export function createOAuthServer(options: OAuthServerOptions): OAuthServer {
     return undefined;
   };
 
-  const issueTokens = (grant: { k: string; ci: string }): Response => {
+  const issueTokens = ({ k, ci, iat }: Grant): Response => {
     const at = seconds();
+    const grant: Grant = { k, ci, iat };
     return json({
       access_token: sealer.seal("access", { ...grant, exp: at + ACCESS_TTL_S }),
       token_type: "Bearer",
       expires_in: ACCESS_TTL_S,
-      refresh_token: sealer.seal("refresh", { ...grant, exp: at + REFRESH_TTL_S }),
+      refresh_token: sealer.seal("refresh", {
+        ...grant,
+        exp: Math.min(at + REFRESH_TTL_S, iat + SIGN_IN_MAX_AGE_S),
+      }),
       scope: SCOPE,
     });
   };
@@ -373,8 +418,14 @@ export function createOAuthServer(options: OAuthServerOptions): OAuthServer {
 
   const authorizeSubmit = async (request: Request): Promise<Response> => {
     // A browser always sends Origin on a form POST; only this server's own page may post here.
+    // "null" is what a browser sends when a referrer policy or privacy mode hides the origin;
+    // Sec-Fetch-Site, which a page cannot forge, then says whether it was this site.
     const origin = request.headers.get("origin");
-    if (origin !== null && origin !== issuer) {
+    const sameSite =
+      origin === null ||
+      origin === issuer ||
+      (origin === "null" && request.headers.get("sec-fetch-site") === "same-origin");
+    if (!sameSite) {
       return errorPage("This form can only be submitted from the sign-in page.", 403);
     }
     const text = await readBody(request);
@@ -394,8 +445,12 @@ export function createOAuthServer(options: OAuthServerOptions): OAuthServer {
         status,
       });
 
-    if (!keyCheckAllowed()) return again("Too many attempts right now. Wait a minute.", 429);
     const apiKey = (form.get("api_key") ?? "").trim();
+    // Decided without calling Immich, so it costs nothing from the budget below.
+    if (!looksLikeKey(apiKey)) return again("That does not look like an Immich API key.", 400);
+    if (!keyCheckAllowed(clientAddress(request))) {
+      return again("Too many attempts right now. Wait a minute.", 429);
+    }
     const problem = await keyProblem(apiKey);
     if (problem) return again(problem.message, problem.kind === "unreachable" ? 502 : 400);
 
@@ -444,7 +499,7 @@ export function createOAuthServer(options: OAuthServerOptions): OAuthServer {
         ) {
           return oauthError(400, "invalid_grant", "The authorization code is not valid.");
         }
-        return issueTokens({ k: pending.apiKey, ci });
+        return issueTokens({ k: pending.apiKey, ci, iat: seconds() });
       }
       case "refresh_token": {
         const refresh = sealer.open<TokenPayload>("refresh", form.get("refresh_token") ?? "");
@@ -457,7 +512,7 @@ export function createOAuthServer(options: OAuthServerOptions): OAuthServer {
         if (problem?.kind === "rejected") {
           return oauthError(400, "invalid_grant", "The Immich API key is no longer accepted.");
         }
-        return issueTokens({ k: refresh.k, ci });
+        return issueTokens({ k: refresh.k, ci, iat: refresh.iat });
       }
       default:
         return oauthError(

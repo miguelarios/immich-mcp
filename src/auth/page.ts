@@ -9,7 +9,9 @@ const HEADERS = {
     "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
   "x-frame-options": "DENY",
   "x-content-type-options": "nosniff",
-  "referrer-policy": "no-referrer",
+  // Not "no-referrer": that makes the browser send "Origin: null" with the form, hiding that
+  // it came from this page. The page's URL still never leaves this site.
+  "referrer-policy": "same-origin",
 };
 
 function escapeHtml(value: string): string {
@@ -30,6 +32,7 @@ const STYLE = `
   label { display: block; font-weight: 600; margin: 1.25rem 0 .35rem; }
   input { box-sizing: border-box; width: 100%; padding: .6rem; font: inherit; }
   button { margin-top: 1rem; padding: .6rem 1.2rem; font: inherit; font-weight: 600; cursor: pointer; }
+  .warn { border-left: 4px solid #b26a00; padding: .5rem .75rem; margin: 1rem 0; }
   .error { border-left: 4px solid #c62828; padding: .5rem .75rem; margin: 1rem 0; }
   .note { opacity: .75; font-size: .9rem; margin-top: 1.5rem; }
 `;
@@ -73,8 +76,10 @@ export function signInPage(view: SignInPage): Response {
   return page(
     "Connect your Immich photos",
     `<h1>Connect your Immich photos</h1>
-<p><strong>${escapeHtml(view.clientName)}</strong> is asking to search and view your photos.
-After you connect, you return to ${returnsTo}. If you did not start this, close this page.</p>
+<p>An app that calls itself <strong>${escapeHtml(view.clientName)}</strong> is asking to search and
+view your photos. After you connect, you return to ${returnsTo}.</p>
+<p class="warn"><strong>Only continue if you started this yourself, just now, in your own app.</strong>
+If someone sent you a link to this page, close it: connecting would give them your photos.</p>
 ${error}
 <ol>
 <li>Open <a href="${keysUrl}" target="_blank" rel="noopener noreferrer">Immich &rarr; Account Settings &rarr; API Keys</a>

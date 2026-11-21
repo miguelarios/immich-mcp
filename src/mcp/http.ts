@@ -46,6 +46,9 @@ export const MCP_HTTP_PATH = "/mcp";
 /** Liveness probe for container health checks. Touches no upstream service. */
 export const HEALTH_PATH = "/healthz";
 
+/** With sign-in on, one caller holds at most this many 2025-era sessions; the oldest is closed. */
+const MAX_SESSIONS_PER_CALLER = 20;
+
 /** A 2025-era session idle this long is closed; the client re-initializes. */
 const DEFAULT_SESSION_IDLE_MS = 30 * 60_000;
 
@@ -172,7 +175,13 @@ export function createHttpHandler(
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (id) => {
-        sessions.set(id, { transport, lastSeen: Date.now(), owner: callerOf(authInfo) });
+        const owner = callerOf(authInfo);
+        if (options.auth) {
+          // A Map iterates in insertion order, so the first match is the oldest.
+          const mine = [...sessions].filter(([, session]) => session.owner === owner);
+          if (mine.length >= MAX_SESSIONS_PER_CALLER) closeSession(mine[0][0]);
+        }
+        sessions.set(id, { transport, lastSeen: Date.now(), owner });
       },
     });
     transport.onclose = () => {
