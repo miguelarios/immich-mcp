@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.0 (2026-11-22)
+
+The rest of Immich's search filters, and inputs grouped like its filter panel.
+
+**Breaking:** the flat `city`, `state`, `country`, `takenFrom` and `takenTo` arguments are replaced
+by `place {city, state, country}` and `taken {from, to}`. Clients read the schema on each
+connection, so nothing needs migrating.
+
+- New filters on every search: `minRating` / `unrated`, `camera {make, model, lens}`, `tags` (all
+  must be on the photo) and `untagged`. Camera values and tags are given by name and resolved
+  against what the library has.
+- `search_photo_metadata` takes `path`: part of the folder or full path a file is stored under.
+  `get_photo` reports a photo's path.
+- New tools `list_tags` and `list_cameras`.
+- Every tool refuses an argument it does not have, instead of ignoring it, and a malformed date is
+  refused by the schema.
+- Each search's description says when to use it and when to use a sibling instead.
+- Sign-in creates keys with `tag.read` too. Existing connections keep working; to use the tag
+  filters, reconnect and sign in again.
+
 ## 0.3.0 (2026-11-21)
 
 Signing in no longer needs an API key made by hand.
