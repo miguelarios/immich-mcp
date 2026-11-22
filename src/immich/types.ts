@@ -47,6 +47,8 @@ export interface Asset {
   id: string;
   type: AssetType;
   originalFileName: string;
+  /** Where the file lives on the server, e.g. `/data/library/ada/2024/IMG_0001.jpg`. */
+  originalPath?: string;
   originalMimeType?: string;
   /** Wall-clock time where the photo was taken, serialized with a misleading `Z`. */
   localDateTime: string;
@@ -148,12 +150,19 @@ export interface SearchFilter {
   type?: { eq?: AssetType; in?: AssetType[] };
   visibility?: { in: AssetVisibility[] };
   isFavorite?: { eq: boolean };
+  hasTags?: { eq: boolean };
   city?: { in: string[] };
   state?: { in: string[] };
   country?: { in: string[] };
+  make?: { in: string[] };
+  model?: { in: string[] };
+  lensModel?: { in: string[] };
+  /** `eq: null` means unrated. */
+  rating?: { eq?: number | null; gte?: number };
   ocr?: { matches: string };
   description?: { like: string };
   originalFileName?: { like: string };
+  originalPath?: { like: string };
   personIds?: IdsFilter;
   albumIds?: IdsFilter;
   tagIds?: IdsFilter;
@@ -184,4 +193,12 @@ export interface ApiKeyInfo {
   id: string;
   name: string;
   permissions: string[];
+}
+
+/** `GET /tags`. `value` is the full path ("Travel/2024"); `name` is its last part. */
+export interface Tag {
+  id: string;
+  name: string;
+  value: string;
+  parentId?: string | null;
 }

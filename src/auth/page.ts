@@ -2,6 +2,13 @@
 
 export const REQUIRED_PERMISSIONS = ["asset.read", "asset.view", "person.read", "album.read"];
 
+/**
+ * What a key gets when this server creates it: the required permissions plus
+ * `tag.read`, which only the tag filters need. It is not required of a pasted
+ * key, so connections made before tags existed keep working.
+ */
+export const CREATED_PERMISSIONS = [...REQUIRED_PERMISSIONS, "tag.read"];
+
 const HEADERS = {
   "content-type": "text/html; charset=utf-8",
   "cache-control": "no-store",
@@ -82,7 +89,8 @@ export function signInPage(view: SignInPage): Response {
   const keyForm = `<ol>
 <li>Open <a href="${keysUrl}" target="_blank" rel="noopener noreferrer">Immich &rarr; Account Settings &rarr; API Keys</a>
 and sign in as usual.</li>
-<li>Create a key with only these permissions: ${permissions}.</li>
+<li>Create a key with only these permissions: ${permissions}, and <code>tag.read</code> if you
+want to search by tag.</li>
 <li>Paste the key below.</li>
 </ol>
 <form method="post" action="/authorize">

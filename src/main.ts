@@ -17,8 +17,9 @@ export const INSTRUCTIONS =
   "Search and look at the user's Immich photo library (read-only). " +
   "Pick the search by what the user remembers: what the photo SHOWS -> search_photos; " +
   "text written IN the image (receipt, sign, document, screenshot) -> search_photo_text; " +
-  "who/where/when/album/file name -> search_photo_metadata. All three take the same people, place, date and album filters, " +
-  "given as plain names. Then use view_photo to see a result before describing it, and get_photo for its details and full text. " +
+  "who/where/when/album/tag/rating/camera/file name -> search_photo_metadata. All three take the same filters " +
+  "(people, place, taken, camera, album, tags, rating), given as plain names; list_people, list_albums, list_tags and " +
+  "list_cameras show the names a filter accepts. Then use view_photo to see a result before describing it, and get_photo for its details and full text. " +
   "Share a photo's url so the user can open it in Immich.";
 
 /**

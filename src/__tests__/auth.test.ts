@@ -15,7 +15,7 @@ import { ImmichClient } from "../immich/client.js";
 import { PhotoLibrary } from "../library/PhotoLibrary.js";
 import { createServer } from "../main.js";
 import { createHttpHandler, serveHttp } from "../mcp/tools.js";
-import { BASE, READ_PERMISSIONS, fakeImmich } from "./fakeImmich.js";
+import { BASE, CREATED_PERMISSIONS, READ_PERMISSIONS, fakeImmich } from "./fakeImmich.js";
 
 const PUBLIC = "http://localhost:3000";
 const SECRET = "0123456789abcdefghijklmnopqrstuvwxyzABCD";
@@ -419,7 +419,8 @@ describe("signing in with an Immich email and password", () => {
 
     expect(ctx.fake.createdKeys).toHaveLength(1);
     expect(ctx.fake.createdKeys[0].name).toMatch(/^Immich MCP \(Claude · [\w-]{6}\)$/);
-    expect(ctx.fake.createdKeys[0].permissions).toEqual(READ_PERMISSIONS);
+    // The four the tools need, plus tag.read for the tag filters.
+    expect(ctx.fake.createdKeys[0].permissions).toEqual(CREATED_PERMISSIONS);
     // The session opened with the password is closed again.
     expect(ctx.fake.sessions.size).toBe(0);
     expect(ctx.fake.callsTo("POST", "/api/auth/logout")).toHaveLength(1);

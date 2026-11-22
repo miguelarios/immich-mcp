@@ -18,10 +18,12 @@ Seven tools, chosen around workflows rather than endpoints:
 5. `view_photo` → `GET /assets/{id}/thumbnail?size=preview|thumbnail`, returned as image content
 6. `list_people` → `GET /search/person` or `GET /people`
 7. `list_albums` → `GET /albums`
+8. `list_tags` → `GET /tags` (0.4)
+9. `list_cameras` → `GET /search/suggestions` for make, model and lens (0.4)
 
-The Immich app has separate "file name" and "description" modes; here both are parameters of the
-metadata search, because a model looking for "IMG_1234 from Cancún" wants them combined with the
-other filters in one call.
+The Immich app has separate "file name", "description" and "full path or folder" modes; here all
+three are parameters of the metadata search (`path` since 0.4), because a model looking for
+"IMG_1234 from Cancún" wants them combined with the other filters in one call.
 
 ### Rejected
 
@@ -49,7 +51,7 @@ other filters in one call.
   `/search/suggestions`, because Immich's place filter is exact and case-sensitive ("cancun" finds
   nothing when it stored "Cancún"). Every search returns `applied` so the model can see, and tell
   the user, what it actually searched for.
-- **Dates are calendar periods in `TZ`, both ends inclusive.** `takenTo: "2024"` means through the
+- **Dates are calendar periods in `TZ`, both ends inclusive.** `taken.to: "2024"` means through the
   last instant of 2024 locally (`lt` the next period's start). The `takenAt` filter compares UTC
   instants, so the zone conversion happens here, DST-correct.
 - **Default visibility is the timeline.** Without a visibility filter Immich also returns the hidden
@@ -65,6 +67,67 @@ other filters in one call.
 
 Smart search ~0.2-0.6 s warm (first call after idle ~6 s while the CLIP model loads), OCR search
 ~0.2 s, metadata search ~0.05 s, OCR lines per asset ~0.04 s, preview ~0.3 MB.
+
+# Design: the rest of the filters, and grouped inputs (0.4)
+
+## What was added
+
+Every search takes star rating (`minRating`, `unrated`), camera (`camera {make, model, lens}`),
+tags (`tags`, all must be present) and `untagged`. These are the filters of Immich's own search
+panel that 0.1 left out.
+
+## Decisions
+
+- **Inputs are grouped like Immich's filter panel.** `place {city, state, country}`,
+  `taken {from, to}` and `camera {make, model, lens}` replace the loose `city`, `takenFrom`…
+  JSON Schema has no notion of sections for sibling properties; a nested object is how a schema
+  says "these belong together", and the group's description says once what all its fields mean
+  (where it was taken, when, with what). This is a breaking change to the argument names. A
+  client reads the schema on every connection, so nothing has to be migrated.
+- **Unknown arguments are refused** (`additionalProperties: false`). Before, an argument the tool
+  did not have was dropped by the SDK without a word, so a stale `city` would have run the search
+  unfiltered and looked like an answer.
+- **Dates stay strings, now with a pattern.** JSON has no date type, and a date here is
+  deliberately a *period* of varying width (a year, a month, a day) or an instant, which
+  `format: date` cannot say. Separate year/month/day fields would triple the arguments and make
+  "all of 2024" three fields with two left empty. The pattern makes the schema refuse "June 2024"
+  before the handler runs.
+- **How a model learns the allowed values.** MCP gives a tool argument no dropdown. Three things
+  stand in for one, in the order a model meets them:
+  1. *Free text, resolved here.* The model passes what the user said ("jose", "cancun", "fuji");
+     the server matches it against what the library has. This is the common path and costs no
+     extra call.
+  2. *Candidates in the error.* An unknown or ambiguous value fails with the close matches, so
+     one retry usually lands.
+  3. *List tools* (`list_people`, `list_albums`, `list_tags`, `list_cameras`) for browsing, or
+     when the user asks "what tags do I have".
+- **Not enums in the schema.** A schema can carry an `enum`, and the tool list is served per
+  connection, so each person's people and tags could be written into it. But those lists run to
+  hundreds, the tool list is sent on every connection and cached as shared, and it would be
+  stale the moment a tag is added. Enums are used for the closed sets (`mediaType`, `sort`).
+- **Camera and tag names fail rather than guess.** "iphone" matches several models; the search
+  refuses and names them, as with people and places. Tags match a full path first, then a last
+  part if only one tag ends in it.
+- **`tag.read` is created but not required.** Sign-in creates keys with it. A key without it (a
+  0.3 connection, or a pasted key) keeps working for everything else and gets a message on the
+  tag filters that says to sign in again.
+
+- **Still three search tools, not one with a search-type option.** Immich's search bar has one
+  text box, so it needs a selector, and its placeholder changes with the selection. A tool has no
+  such constraint, and a `mode` argument would make one field mean a description, a file name, a
+  folder or printed text depending on another; arguments that only exist for some modes (paging,
+  sort, attaching OCR lines) cannot be expressed in a schema clients handle reliably. Each tool's
+  description does the job of the placeholder: it says when to use it and when a sibling fits
+  better. Worth trying later, once checked against a real server: one tool whose `query`, `text`,
+  `fileName`, `path` and `description` are all optional and combine, since Immich's context
+  search takes the same filter object.
+
+### Rejected
+
+- **`rating` as an exact number.** "My best photos" means at least N; an exact match makes
+  "4 or 5 stars" two calls. `unrated` covers the one exact case that matters.
+- **A single `list_filter_values` tool with a `kind` argument.** One more enum to route on, and
+  the answers have different shapes (people page, cameras come as three lists).
 
 # Design: sign-in for a household (0.2)
 

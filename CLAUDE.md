@@ -50,6 +50,9 @@ Run all four before pushing.
   search has no pagination once `filter` is used.
 - Filters take **names**, resolved server-side, and every search reports what they resolved to
   under `applied`. Unknown or ambiguous names fail with candidates rather than guessing.
+- Filters are shared by all three searches (`FILTER_PROPS`) and grouped like Immich's filter
+  panel (`place`, `taken`, `camera`). Every input schema sets `additionalProperties: false`, so a
+  misspelled or outdated argument is refused instead of silently dropping a filter.
 - Inputs are hand-written JSON Schema (validated by the SDK before the handler runs); outputs are
   valibot schemas the SDK enforces. Every parameter and output field is camelCase (tested).
 - **Sign-in stores nothing.** A password is used for one Immich login to create a read-only key

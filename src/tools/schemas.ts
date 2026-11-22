@@ -31,6 +31,13 @@ const appliedSchema = v.object({
       lte: v.optional(v.string()),
     }),
   ),
+  cameraMake: v.optional(v.string()),
+  cameraModel: v.optional(v.string()),
+  lens: v.optional(v.string()),
+  tags: v.optional(v.array(v.object({ id: v.string(), name: v.string() }))),
+  untagged: v.optional(v.boolean()),
+  minRating: v.optional(v.number()),
+  unrated: v.optional(v.boolean()),
   mediaType: v.optional(v.picklist(["photo", "video"])),
   favoritesOnly: v.optional(v.boolean()),
   includeArchived: v.optional(v.boolean()),
@@ -70,6 +77,7 @@ export const photoDetailSchema = v.object({
   dimensions: v.optional(v.string()),
   fileSizeBytes: v.optional(v.number()),
   mimeType: v.optional(v.string()),
+  path: v.optional(v.string()),
   rating: v.optional(v.number()),
   albums: v.array(v.string()),
   tags: v.array(v.string()),
@@ -104,4 +112,15 @@ export const albumsResultSchema = v.object({
     }),
   ),
   count: v.number(),
+});
+
+export const tagsResultSchema = v.object({
+  tags: v.array(v.object({ id: v.string(), name: v.string() })),
+  count: v.number(),
+});
+
+export const camerasResultSchema = v.object({
+  makes: v.array(v.string()),
+  models: v.array(v.string()),
+  lenses: v.array(v.string()),
 });
