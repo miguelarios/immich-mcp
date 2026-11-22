@@ -460,6 +460,7 @@ export class PhotoLibrary {
   async searchByMetadata(
     args: {
       fileName?: string;
+      path?: string;
       description?: string;
       limit: number;
       cursor?: string;
@@ -468,6 +469,7 @@ export class PhotoLibrary {
   ) {
     const { filter, applied } = await this.buildFilter(args);
     if (args.fileName?.trim()) filter.originalFileName = { like: containsPattern(args.fileName) };
+    if (args.path?.trim()) filter.originalPath = { like: containsPattern(args.path) };
     if (args.description?.trim()) filter.description = { like: containsPattern(args.description) };
     const field: SearchOrderField = "fileCreatedAt";
     const response = await this.client.metadataSearch({
@@ -515,6 +517,7 @@ export class PhotoLibrary {
       ...(width && height ? { dimensions: `${width}x${height}` } : {}),
       ...(exif.fileSizeInByte ? { fileSizeBytes: exif.fileSizeInByte } : {}),
       ...(asset.originalMimeType ? { mimeType: asset.originalMimeType } : {}),
+      ...(asset.originalPath ? { path: asset.originalPath } : {}),
       ...(typeof exif.rating === "number" ? { rating: exif.rating } : {}),
       albums: albums.map((album) => album.albumName),
       tags: (asset.tags ?? [])

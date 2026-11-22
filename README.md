@@ -8,7 +8,7 @@ workflows rather than raw endpoints:
 | --- | --- | --- |
 | `search_photos` | **context** — what the photo shows (CLIP smart search) | "sunrise on the beach" |
 | `search_photo_text` | **text in the image** (OCR) | "check out receipt", "wifi password" |
-| `search_photo_metadata` | file name, description, people, place, date, camera, album, tags, rating | "videos of Ada in Mexico, 2024", "my 5-star photos" |
+| `search_photo_metadata` | file name, folder or path, description, people, place, date, camera, album, tags, rating | "videos of Ada in Mexico, 2024", "my 5-star photos" |
 | `get_photo` | one photo's details and full OCR text | |
 | `view_photo` | the image itself, returned as MCP image content | |
 | `list_people` / `list_albums` / `list_tags` / `list_cameras` | the names the filters accept | |

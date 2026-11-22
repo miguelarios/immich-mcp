@@ -21,9 +21,9 @@ Seven tools, chosen around workflows rather than endpoints:
 8. `list_tags` → `GET /tags` (0.4)
 9. `list_cameras` → `GET /search/suggestions` for make, model and lens (0.4)
 
-The Immich app has separate "file name" and "description" modes; here both are parameters of the
-metadata search, because a model looking for "IMG_1234 from Cancún" wants them combined with the
-other filters in one call.
+The Immich app has separate "file name", "description" and "full path or folder" modes; here all
+three are parameters of the metadata search (`path` since 0.4), because a model looking for
+"IMG_1234 from Cancún" wants them combined with the other filters in one call.
 
 ### Rejected
 
@@ -111,6 +111,16 @@ panel that 0.1 left out.
 - **`tag.read` is created but not required.** Sign-in creates keys with it. A key without it (a
   0.3 connection, or a pasted key) keeps working for everything else and gets a message on the
   tag filters that says to sign in again.
+
+- **Still three search tools, not one with a search-type option.** Immich's search bar has one
+  text box, so it needs a selector, and its placeholder changes with the selection. A tool has no
+  such constraint, and a `mode` argument would make one field mean a description, a file name, a
+  folder or printed text depending on another; arguments that only exist for some modes (paging,
+  sort, attaching OCR lines) cannot be expressed in a schema clients handle reliably. Each tool's
+  description does the job of the placeholder: it says when to use it and when a sibling fits
+  better. Worth trying later, once checked against a real server: one tool whose `query`, `text`,
+  `fileName`, `path` and `description` are all optional and combine, since Immich's context
+  search takes the same filter object.
 
 ### Rejected
 

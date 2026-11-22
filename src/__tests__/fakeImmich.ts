@@ -48,6 +48,7 @@ export const ASSETS: Record<string, Asset> = {
   [IDS.beach]: asset({
     id: IDS.beach,
     originalFileName: "IMG_0001.jpg",
+    originalPath: "/data/library/ada/2024/Beach Trip/IMG_0001.jpg",
     people: [
       { id: IDS.ada, name: "Ada Lovelace" },
       { id: "ffffffff-ffff-4fff-8fff-ffffffffffff", name: "" },

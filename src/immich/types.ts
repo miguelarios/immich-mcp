@@ -47,6 +47,8 @@ export interface Asset {
   id: string;
   type: AssetType;
   originalFileName: string;
+  /** Where the file lives on the server, e.g. `/data/library/ada/2024/IMG_0001.jpg`. */
+  originalPath?: string;
   originalMimeType?: string;
   /** Wall-clock time where the photo was taken, serialized with a misleading `Z`. */
   localDateTime: string;
@@ -160,6 +162,7 @@ export interface SearchFilter {
   ocr?: { matches: string };
   description?: { like: string };
   originalFileName?: { like: string };
+  originalPath?: { like: string };
   personIds?: IdsFilter;
   albumIds?: IdsFilter;
   tagIds?: IdsFilter;

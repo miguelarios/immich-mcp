@@ -347,11 +347,13 @@ describe("searches", () => {
     const { library, fake } = setup();
     const first = await library.searchByMetadata({
       fileName: "IMG_0003",
+      path: "2019/Japan_trip",
       description: "walk",
       limit: 5,
       sort: "oldest",
     });
     const [call] = fake.callsTo("POST", "/api/search/metadata");
+    expect(call.body.filter.originalPath).toEqual({ like: "%2019/Japan\\_trip%" });
     expect(call.body.filter.originalFileName).toEqual({ like: "%IMG\\_0003%" });
     expect(call.body.filter.description).toEqual({ like: "%walk%" });
     expect(call.body.orderBy).toEqual({ field: "fileCreatedAt", direction: "asc" });
@@ -395,6 +397,7 @@ describe("summaries and details", () => {
   it("get_photo gathers exif, albums, tags and the OCR text in reading order", async () => {
     const { library } = setup();
     const beach = await library.getPhoto(IDS.beach, true);
+    expect(beach.path).toBe("/data/library/ada/2024/Beach Trip/IMG_0001.jpg");
     expect(beach).toMatchObject({
       takenAtUtc: "2024-06-15T12:12:00.000Z",
       timeZone: "UTC-5",

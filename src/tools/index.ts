@@ -122,6 +122,7 @@ type ContextArgs = Filters & { query: string; limit?: number };
 type TextArgs = Filters & { text: string; limit?: number; cursor?: string; includeText?: boolean };
 type MetadataArgs = Filters & {
   fileName?: string;
+  path?: string;
   description?: string;
   limit?: number;
   cursor?: string;
@@ -139,11 +140,15 @@ export const PHOTO_TOOLS: ReadonlyArray<ToolDef<PhotoLibrary>> = [
     name: "search_photos",
     title: "Search Photos by Context",
     description:
-      "Find photos and videos by what they show, described in natural language (Immich smart search, CLIP): " +
-      '"sunrise on the beach", "kids blowing out birthday candles", "red car in the snow". ' +
-      "Results are ranked by visual similarity, best first, in a single page: for more, raise limit or narrow the filters. " +
-      "Combine with the people, place, date, camera, tag and rating filters to narrow it down. " +
-      "For words printed IN the image (signs, receipts, documents, screenshots) use search_photo_text instead.",
+      'Find photos and videos by what they LOOK like, from a description in plain words (Immich\'s "Context" search): ' +
+      '"sunrise on the beach", "kids blowing out birthday candles", "a red car in the snow". ' +
+      "Use it whenever the user describes a scene, an object or an activity, even loosely. " +
+      "It understands what is visible, not who people are or where and when a photo was taken: put names, places, " +
+      "dates, cameras, tags and ratings in the filters, which narrow the search before it ranks. " +
+      "Results come best match first in one page, and there is always a best match even when nothing really fits, " +
+      "so look at the top results with view_photo before presenting them; for more, raise limit or tighten the filters. " +
+      "Use search_photo_text instead for words written IN the image (a receipt, a sign, a screenshot), and " +
+      "search_photo_metadata when the user gives only facts (who, where, when, album, file name) and no description.",
     annotations: READ_ONLY,
     inputSchema: {
       type: "object",
@@ -174,15 +179,23 @@ export const PHOTO_TOOLS: ReadonlyArray<ToolDef<PhotoLibrary>> = [
     name: "search_photo_text",
     title: "Search Photos by Text (OCR)",
     description:
-      "Find photos by text that appears IN the image, read by Immich's OCR: receipts, signs, menus, whiteboards, " +
+      "Find photos by words written IN the image, as read by Immich's OCR: receipts, signs, menus, whiteboards, " +
       'documents, screenshots, labels, license plates. Example: text "check out receipt" or "wifi password". ' +
-      "Matching tolerates OCR misspellings. Each result includes the matching lines of text so you can see why it matched; " +
-      "call get_photo for the full text of one photo.",
+      "Use it when the user remembers what a photo SAYS rather than what it shows. " +
+      "Matching tolerates OCR misreadings, and each result carries the lines that matched so you can see why; " +
+      "get_photo returns all the text of one photo. Newest first, paged with cursor. " +
+      "Use search_photos instead when the user describes how the photo looks, and search_photo_metadata for " +
+      "its file name or the description someone typed on it in Immich (neither is text in the image).",
     annotations: READ_ONLY,
     inputSchema: {
       type: "object",
       properties: {
-        text: { type: "string", minLength: 1, description: "Words that appear in the image." },
+        text: {
+          type: "string",
+          minLength: 1,
+          description:
+            'Words that appear in the image, e.g. "boarding pass" or a store name. A few distinctive words work better than a sentence.',
+        },
         ...FILTER_PROPS,
         includeText: {
           type: "boolean",
@@ -213,11 +226,15 @@ export const PHOTO_TOOLS: ReadonlyArray<ToolDef<PhotoLibrary>> = [
     name: "search_photo_metadata",
     title: "Search Photos by Metadata",
     description:
-      "List photos by facts rather than content: who is in them, where and when they were taken, with which camera, " +
-      "album, tags, star rating, file name or the description written on them. Newest first unless sort is oldest. Use it for " +
+      "List photos by FACTS about them rather than by how they look: who is in them, where and when they were taken, " +
+      "with which camera, album, tags, star rating, file name, folder, or the description typed on them in Immich. " +
+      "Use it when the user names facts and describes nothing to see: " +
       '"every photo of Ada from June 2024", "videos taken in Cancún", "my 5-star photos", "everything still untagged", ' +
-      '"IMG_1234", or to browse a date range. ' +
-      "All filters are optional, but give at least one.",
+      '"IMG_1234", "what is in the 2019/Japan folder", or to browse a date range. ' +
+      "It returns everything that matches, newest first unless sort is oldest, paged with cursor, with the total count; " +
+      "nothing is ranked. All arguments are optional, but give at least one. " +
+      "Use search_photos instead as soon as the user describes what the photo shows (the same filters apply there), " +
+      "and search_photo_text for words written in the image.",
     annotations: READ_ONLY,
     inputSchema: {
       type: "object",
@@ -225,12 +242,21 @@ export const PHOTO_TOOLS: ReadonlyArray<ToolDef<PhotoLibrary>> = [
         fileName: {
           type: "string",
           minLength: 1,
-          description: 'Part of the original file name, e.g. "IMG_1234" or ".mov".',
+          description:
+            'Part of the original file name or its extension, e.g. "IMG_1234", "IMG_1234.JPG" or ".png".',
+        },
+        path: {
+          type: "string",
+          minLength: 1,
+          description:
+            'Part of the folder or full path the file is stored under on the server, e.g. "2019/Japan" or "/Camera Roll/". ' +
+            "For a folder of imported photos; get_photo shows a photo's path.",
         },
         description: {
           type: "string",
           minLength: 1,
-          description: "Part of the description written on the photo in Immich.",
+          description:
+            'Part of the description (caption) typed on the photo in Immich, e.g. "birthday". Not text that appears in the image.',
         },
         ...FILTER_PROPS,
         sort: { type: "string", enum: ["newest", "oldest"], description: "Default newest." },
@@ -252,8 +278,9 @@ export const PHOTO_TOOLS: ReadonlyArray<ToolDef<PhotoLibrary>> = [
     name: "get_photo",
     title: "Get Photo Details",
     description:
-      "Everything known about one photo or video: when (local and UTC) and where (place and coordinates) it was taken, " +
-      "camera, people, albums, tags, description, and all the text OCR read from it.",
+      "Everything known about one photo or video from a search result: when (local and UTC) and where (place and " +
+      "coordinates) it was taken, camera and lens, star rating, people, albums, tags, description, file path, and all " +
+      "the text OCR read from it. Use it to answer a question about one photo; to SEE the photo use view_photo.",
     annotations: READ_ONLY,
     inputSchema: {
       type: "object",

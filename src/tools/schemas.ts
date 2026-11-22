@@ -77,6 +77,7 @@ export const photoDetailSchema = v.object({
   dimensions: v.optional(v.string()),
   fileSizeBytes: v.optional(v.number()),
   mimeType: v.optional(v.string()),
+  path: v.optional(v.string()),
   rating: v.optional(v.number()),
   albums: v.array(v.string()),
   tags: v.array(v.string()),
