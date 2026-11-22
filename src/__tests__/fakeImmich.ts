@@ -5,7 +5,7 @@
  * shapes (paths, query strings, filter bodies, headers) are asserted exactly
  * as they would reach a server. Every name and place here is a placeholder.
  */
-import type { Album, Asset, OcrLine, PersonRef } from "../immich/types.js";
+import type { Album, Asset, OcrLine, PersonRef, Tag } from "../immich/types.js";
 
 export const IDS = {
   beach: "11111111-1111-4111-8111-111111111111",
@@ -130,7 +130,22 @@ export const PLACES: Record<string, string[]> = {
   city: ["Playa Example", "Ciudad de México", "Ciudad de Mexico", "Zürich"],
   state: ["Quintana Roo", "Texas"],
   country: ["Mexico", "Switzerland", "United States"],
+  "camera-make": ["Apple", "FUJIFILM"],
+  "camera-model": ["iPhone 15", "iPhone 15 Pro", "X-T5"],
+  "camera-lens-model": ["iPhone 15 back camera 6.86mm f/1.78", "XF23mmF2 R WR"],
 };
+
+export const TAGS: Tag[] = [
+  { id: "71717171-7171-4717-8717-717171717171", name: "Travel", value: "Travel", parentId: null },
+  {
+    id: "72727272-7272-4727-8727-727272727272",
+    name: "2024",
+    value: "Travel/2024",
+    parentId: "71717171-7171-4717-8717-717171717171",
+  },
+  { id: "73737373-7373-4737-8737-737373737373", name: "2024", value: "Family/2024" },
+  { id: "74747474-7474-4747-8747-747474747474", name: "Recetas", value: "Recetas" },
+];
 
 export interface Recorded {
   method: string;
@@ -184,10 +199,12 @@ function page(items: Asset[], extra: Record<string, unknown> = {}) {
 }
 
 export const READ_PERMISSIONS = ["asset.read", "asset.view", "person.read", "album.read"];
+/** What a key created by sign-in holds. */
+export const CREATED_PERMISSIONS = [...READ_PERMISSIONS, "tag.read"];
 
 export function fakeImmich(): FakeImmich {
   const calls: Recorded[] = [];
-  const apiKeys = new Map<string, string[]>([["k", READ_PERMISSIONS]]);
+  const apiKeys = new Map<string, string[]>([["k", CREATED_PERMISSIONS]]);
   const users = new Map<string, string>();
   const sessions = new Set<string>();
   const createdKeys: FakeImmich["createdKeys"] = [];
@@ -282,7 +299,20 @@ export function fakeImmich(): FakeImmich {
       return json({ total: PEOPLE.length, hidden: 0, hasNextPage: true, people: PEOPLE });
     }
     if (method === "GET" && path === "/api/search/suggestions") {
-      return json(PLACES[search.get("type") ?? ""] ?? []);
+      const values = PLACES[search.get("type") ?? ""] ?? [];
+      // Models are scoped by make, as in Immich.
+      if (search.get("type") === "camera-model" && search.get("make")) {
+        const apple = search.get("make") === "Apple";
+        return json(values.filter((model) => model.startsWith("iPhone") === apple));
+      }
+      return json(values);
+    }
+    if (method === "GET" && path === "/api/tags") {
+      const permissions = apiKeys.get(headers.get("x-api-key") ?? "") ?? [];
+      if (!permissions.includes("tag.read") && !permissions.includes("all")) {
+        return json({ message: "Missing required permission: tag.read" }, 403);
+      }
+      return json(TAGS);
     }
     if (method === "GET" && path === "/api/albums") {
       if (search.get("assetId") === IDS.beach) return json([ALBUMS[0]]);

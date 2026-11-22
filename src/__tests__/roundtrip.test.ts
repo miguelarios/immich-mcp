@@ -96,12 +96,24 @@ describe.each<Era>(["legacy", "modern"])("immich-mcp over the wire (%s era)", (e
     const { client, fake } = await connect(era);
     const result = await client.callTool({
       name: "search_photos",
-      arguments: { query: "sunrise on the beach", people: ["ada"], takenFrom: "2024" },
+      arguments: {
+        query: "sunrise on the beach",
+        people: ["ada"],
+        taken: { from: "2024" },
+        camera: { make: "apple" },
+        tags: ["travel"],
+        minRating: 4,
+      },
     });
     expect(result.isError).toBeFalsy();
     const content = result.structuredContent as any;
     expect(content.count).toBe(2);
     expect(content.applied.people).toEqual([{ id: IDS.ada, name: "Ada Lovelace" }]);
+    expect(content.applied).toMatchObject({
+      cameraMake: "Apple",
+      tags: [{ name: "Travel" }],
+      minRating: 4,
+    });
     expect(JSON.parse((result.content as any)[0].text)).toEqual(content);
     expect(fake.callsTo("POST", "/api/search/smart")[0].body.size).toBe(20);
   });
@@ -135,7 +147,7 @@ describe.each<Era>(["legacy", "modern"])("immich-mcp over the wire (%s era)", (e
     const { client } = await connect(era);
     const result = await client.callTool({
       name: "search_photo_metadata",
-      arguments: { city: "Atlantis" },
+      arguments: { place: { city: "Atlantis" } },
     });
     expect(result.isError).toBe(true);
     const body = JSON.parse((result.content as any)[0].text);
@@ -154,6 +166,32 @@ describe.each<Era>(["legacy", "modern"])("immich-mcp over the wire (%s era)", (e
     expect(caption.type).toBe("text");
     expect(caption.text).toContain("IMG_0001.jpg · 2024-06-15T07:12:00 · Playa Example");
     expect(caption.text).toContain(`${BASE}/photos/${IDS.beach}`);
+  });
+
+  it("refuses an argument the tool does not have, and a date that is not one", async () => {
+    const { client, fake } = await connect(era);
+    const before = fake.calls.length;
+    // The flat names from 0.3: silently ignoring them would drop the filter.
+    const stale = await client
+      .callTool({ name: "search_photo_metadata", arguments: { city: "Playa Example" } })
+      .catch((error) => ({ isError: true, content: [{ type: "text", text: String(error) }] }));
+    expect(stale.isError).toBe(true);
+    const badDate = await client
+      .callTool({ name: "search_photo_metadata", arguments: { taken: { from: "June 2024" } } })
+      .catch((error) => ({ isError: true, content: [{ type: "text", text: String(error) }] }));
+    expect(badDate.isError).toBe(true);
+    expect(fake.calls).toHaveLength(before);
+  });
+
+  it("list_tags and list_cameras pass their output schemas", async () => {
+    const { client } = await connect(era);
+    const tags = await client.callTool({ name: "list_tags", arguments: { name: "travel" } });
+    expect((tags.structuredContent as any).tags.map((tag: any) => tag.name)).toEqual([
+      "Travel",
+      "Travel/2024",
+    ]);
+    const cameras = await client.callTool({ name: "list_cameras", arguments: {} });
+    expect((cameras.structuredContent as any).makes).toEqual(["Apple", "FUJIFILM"]);
   });
 
   it("get_photo for an unknown id is NOT_FOUND", async () => {
@@ -201,5 +239,20 @@ describe("immich-mcp over Streamable HTTP", () => {
       expect((result.structuredContent as any).albums[0].name).toBe("Beach Trip 2024");
       await client.close();
     }
+  });
+});
+
+describe("input schemas", () => {
+  it("refuse unknown arguments at every level, on every tool", () => {
+    const open: string[] = [];
+    const walk = (schema: any, path: string) => {
+      if (schema?.type !== "object") return;
+      if (schema.additionalProperties !== false) open.push(path);
+      for (const [name, child] of Object.entries(schema.properties ?? {})) {
+        walk(child, `${path}.${name}`);
+      }
+    };
+    for (const tool of PHOTO_TOOLS) walk(tool.inputSchema, tool.name);
+    expect(open).toEqual([]);
   });
 });

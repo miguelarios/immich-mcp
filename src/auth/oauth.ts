@@ -9,7 +9,7 @@ import { ImmichMcpError } from "../errors.js";
 import { ImmichClient } from "../immich/client.js";
 import { type AuthConfig, isLoopbackHost } from "./config.js";
 import { createKeyWithPassword } from "./immichLogin.js";
-import { REQUIRED_PERMISSIONS, errorPage, signInPage } from "./page.js";
+import { CREATED_PERMISSIONS, REQUIRED_PERMISSIONS, errorPage, signInPage } from "./page.js";
 import { Sealer, sha256 } from "./seal.js";
 
 /**
@@ -513,7 +513,7 @@ export function createOAuthServer(options: OAuthServerOptions): OAuthServer {
         { email, password },
         {
           name: keyNameFor(signIn.n, signIn.ci),
-          permissions: REQUIRED_PERMISSIONS,
+          permissions: CREATED_PERMISSIONS,
           // Older than any sign-in can last, so nothing can still be using it.
           expired: {
             prefix: keyPrefixFor(signIn.n),

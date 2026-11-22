@@ -3,7 +3,16 @@ import { InputError, NotFoundError } from "../errors.js";
 import { ImmichClient } from "../immich/client.js";
 import { PhotoLibrary, matchingLines, ocrText } from "../library/PhotoLibrary.js";
 import { containsPattern, fold } from "../library/text.js";
-import { ALBUMS, ASSETS, BASE, IDS, OCR, fakeImmich } from "./fakeImmich.js";
+import {
+  ALBUMS,
+  ASSETS,
+  BASE,
+  IDS,
+  OCR,
+  READ_PERMISSIONS,
+  TAGS,
+  fakeImmich,
+} from "./fakeImmich.js";
 
 function setup(timeZone = "America/Chicago") {
   const fake = fakeImmich();
@@ -151,11 +160,11 @@ describe("buildFilter", () => {
     const { filter, applied } = await library.buildFilter({
       people: ["ada", "José Núñez", IDS.ada],
       album: "trip",
-      city: "playa example",
-      state: "quintana roo",
-      country: "mexico",
-      takenFrom: "2024-06",
-      takenTo: "2024-06",
+      place: { city: "playa example", state: "quintana roo", country: "mexico" },
+      taken: { from: "2024-06", to: "2024-06" },
+      camera: { make: "apple", model: "IPHONE 15", lens: "xf23mmf2 r wr" },
+      tags: ["travel/2024", "recetas", TAGS[3].id],
+      minRating: 4,
       mediaType: "video",
       favoritesOnly: true,
       includeArchived: true,
@@ -167,6 +176,11 @@ describe("buildFilter", () => {
       state: { in: ["Quintana Roo"] },
       country: { in: ["Mexico"] },
       takenAt: { gte: "2024-06-01T05:00:00.000Z", lt: "2024-07-01T05:00:00.000Z" },
+      make: { in: ["Apple"] },
+      model: { in: ["iPhone 15"] },
+      lensModel: { in: ["XF23mmF2 R WR"] },
+      tagIds: { all: [TAGS[1].id, TAGS[3].id] },
+      rating: { gte: 4 },
       type: { eq: "VIDEO" },
       isFavorite: { eq: true },
       visibility: { in: ["timeline", "archive"] },
@@ -178,6 +192,14 @@ describe("buildFilter", () => {
     expect(applied).toMatchObject({
       album: { id: IDS.trip, name: "Beach Trip 2024" },
       city: "Playa Example",
+      cameraMake: "Apple",
+      cameraModel: "iPhone 15",
+      lens: "XF23mmF2 R WR",
+      tags: [
+        { id: TAGS[1].id, name: "Travel/2024" },
+        { id: TAGS[3].id, name: "Recetas" },
+      ],
+      minRating: 4,
       mediaType: "video",
       favoritesOnly: true,
       includeArchived: true,
@@ -186,9 +208,92 @@ describe("buildFilter", () => {
 
   it("fails the whole search when one name does not resolve", async () => {
     const { library } = setup();
-    await expect(library.buildFilter({ people: ["ada"], city: "Atlantis" })).rejects.toThrow(
-      NotFoundError,
+    await expect(
+      library.buildFilter({ people: ["ada"], place: { city: "Atlantis" } }),
+    ).rejects.toThrow(NotFoundError);
+  });
+
+  it("filters for photos with no tag and no rating", async () => {
+    const { library } = setup();
+    const { filter, applied } = await library.buildFilter({ untagged: true, unrated: true });
+    expect(filter).toMatchObject({ hasTags: { eq: false }, rating: { eq: null } });
+    expect(applied).toEqual({ untagged: true, unrated: true });
+  });
+
+  it("refuses filters that contradict each other", async () => {
+    const { library } = setup();
+    await expect(library.buildFilter({ untagged: true, tags: ["travel"] })).rejects.toThrow(
+      "untagged cannot be combined with tags",
     );
+    await expect(library.buildFilter({ unrated: true, minRating: 3 })).rejects.toThrow(
+      "unrated cannot be combined with minRating",
+    );
+  });
+
+  it("offers the close camera models rather than guessing between them", async () => {
+    const { library } = setup();
+    await expect(library.buildFilter({ camera: { model: "iphone" } })).rejects.toThrow(
+      'No photos have camera model "iphone". Close matches: iPhone 15, iPhone 15 Pro.',
+    );
+  });
+});
+
+describe("resolveTag", () => {
+  it("matches a full path, or a last part when only one tag ends in it", async () => {
+    const { library } = setup();
+    await expect(library.resolveTag("family/2024")).resolves.toEqual({
+      id: TAGS[2].id,
+      name: "Family/2024",
+    });
+    await expect(library.resolveTag("TRAVEL")).resolves.toEqual({ id: TAGS[0].id, name: "Travel" });
+    await expect(library.resolveTag("recet")).resolves.toEqual({ id: TAGS[3].id, name: "Recetas" });
+  });
+
+  it("asks for the full path when a name is shared, and names what it could have meant", async () => {
+    const { library } = setup();
+    await expect(library.resolveTag("2024")).rejects.toThrow(
+      '"2024" matches several tags: Travel/2024, Family/2024. Pass the full path.',
+    );
+    await expect(library.resolveTag("nothing")).rejects.toThrow(NotFoundError);
+  });
+
+  it("says how to fix a key that cannot read tags, and leaves other filters working", async () => {
+    const { fake, library } = setup();
+    fake.apiKeys.set("k", READ_PERMISSIONS);
+    await expect(library.buildFilter({ tags: ["travel"] })).rejects.toThrow("lacks tag.read");
+    await expect(library.buildFilter({ minRating: 5 })).resolves.toMatchObject({
+      filter: { rating: { gte: 5 } },
+    });
+  });
+});
+
+describe("list_tags and list_cameras", () => {
+  it("lists tags as full paths, filtered by name", async () => {
+    const { library } = setup();
+    const all = await library.findTags({ limit: 200 });
+    expect(all.tags.map((tag) => tag.name)).toEqual([
+      "Family/2024",
+      "Recetas",
+      "Travel",
+      "Travel/2024",
+    ]);
+    expect((await library.findTags({ name: "travel", limit: 200 })).count).toBe(2);
+  });
+
+  it("lists the cameras the library has, and one make's models", async () => {
+    const { fake, library } = setup();
+    expect(await library.listCameras({})).toEqual({
+      makes: ["Apple", "FUJIFILM"],
+      models: ["iPhone 15", "iPhone 15 Pro", "X-T5"],
+      lenses: ["iPhone 15 back camera 6.86mm f/1.78", "XF23mmF2 R WR"],
+    });
+    const fuji = await library.listCameras({ make: "fujifilm" });
+    expect(fuji.makes).toEqual(["FUJIFILM"]);
+    expect(fuji.models).toEqual(["X-T5"]);
+    const scoped = fake
+      .callsTo("GET", "/api/search/suggestions")
+      .find((call) => call.search.get("make"));
+    expect(scoped?.search.get("make")).toBe("FUJIFILM");
   });
 });
 

@@ -11,6 +11,7 @@ import type {
   SearchResponse,
   SmartSearchRequest,
   SuggestionType,
+  Tag,
   ThumbnailSize,
 } from "./types.js";
 
@@ -81,8 +82,16 @@ export class ImmichClient {
     return this.json("GET", `/people?page=${page}&size=${size}&withHidden=false`);
   }
 
-  suggestions(type: SuggestionType): Promise<string[]> {
-    return this.json("GET", `/search/suggestions?type=${encodeURIComponent(type)}`);
+  /** The distinct values the library has for a place or camera field, optionally within a make. */
+  suggestions(type: SuggestionType, scope: { make?: string } = {}): Promise<string[]> {
+    const query = new URLSearchParams({ type });
+    if (scope.make) query.set("make", scope.make);
+    return this.json("GET", `/search/suggestions?${query}`);
+  }
+
+  /** Every tag of the key's owner. Needs `tag.read`. */
+  listTags(): Promise<Tag[]> {
+    return this.json("GET", "/tags");
   }
 
   async thumbnail(id: string, size: ThumbnailSize): Promise<ImageBytes> {

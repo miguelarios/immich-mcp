@@ -1,4 +1,4 @@
-import { InputError, NotFoundError } from "../errors.js";
+import { ImmichMcpError, InputError, NotFoundError } from "../errors.js";
 import type { ImmichClient } from "../immich/client.js";
 import type {
   Album,
@@ -10,6 +10,7 @@ import type {
   SearchFilter,
   SearchOrderField,
   SuggestionType,
+  Tag,
   ThumbnailSize,
 } from "../immich/types.js";
 import { takenRange, wallClock } from "./dates.js";
@@ -21,11 +22,20 @@ export interface CommonFilters {
   people?: string[];
   /** Album name or id. */
   album?: string;
-  city?: string;
-  state?: string;
-  country?: string;
-  takenFrom?: string;
-  takenTo?: string;
+  /** Where it was taken. */
+  place?: { city?: string; state?: string; country?: string };
+  /** When it was taken: calendar periods or timestamps, both ends inclusive. */
+  taken?: { from?: string; to?: string };
+  /** What it was taken with. */
+  camera?: { make?: string; model?: string; lens?: string };
+  /** Tag names, paths or ids that must all be on the photo. */
+  tags?: string[];
+  /** Only photos with no tag at all. */
+  untagged?: boolean;
+  /** At least this many stars (1-5). */
+  minRating?: number;
+  /** Only photos with no star rating. */
+  unrated?: boolean;
   mediaType?: "photo" | "video" | "any";
   favoritesOnly?: boolean;
   includeArchived?: boolean;
@@ -53,6 +63,13 @@ export interface AppliedFilters {
   state?: string;
   country?: string;
   takenAt?: { gte?: string; lt?: string; lte?: string };
+  cameraMake?: string;
+  cameraModel?: string;
+  lens?: string;
+  tags?: { id: string; name: string }[];
+  untagged?: boolean;
+  minRating?: number;
+  unrated?: boolean;
   mediaType?: "photo" | "video";
   favoritesOnly?: boolean;
   includeArchived?: boolean;
@@ -82,7 +99,8 @@ const OCR_CONCURRENCY = 8;
 export class PhotoLibrary {
   private readonly cacheTtlMs: number;
   private albums?: Cached<Album[]>;
-  private readonly places = new Map<SuggestionType, Cached<string[]>>();
+  private tags?: Cached<Tag[]>;
+  private readonly known = new Map<SuggestionType, Cached<string[]>>();
 
   constructor(
     readonly client: ImmichClient,
@@ -165,21 +183,54 @@ export class PhotoLibrary {
   }
 
   /**
-   * Immich filters places by exact, case-sensitive value, so "cancun" finds
-   * nothing when it stored "Cancún". Resolve against the values it actually has.
+   * Immich filters places and camera fields by exact, case-sensitive value, so
+   * "cancun" finds nothing when it stored "Cancún". Resolve against the values
+   * the library actually has.
    */
-  async resolvePlace(kind: "city" | "state" | "country", ref: string): Promise<string[]> {
+  async resolveKnown(kind: SuggestionType, label: string, ref: string): Promise<string[]> {
     const value = ref.trim();
-    if (!value) throw new InputError(`${kind} cannot be empty.`);
-    const known = await this.knownPlaces(kind);
+    if (!value) throw new InputError(`${label} cannot be empty.`);
+    const known = await this.knownValues(kind);
     const wanted = fold(value);
     // Every stored spelling that folds equal is searched: geocoding and EXIF can
     // store both "Cancún" and "Cancun" for the same place.
-    const exact = known.filter((place) => fold(place) === wanted);
+    const exact = known.filter((entry) => fold(entry) === wanted);
     if (exact.length > 0) return exact;
-    const close = known.filter((place) => fold(place).includes(wanted)).slice(0, 10);
+    const close = known.filter((entry) => fold(entry).includes(wanted)).slice(0, 10);
     const hint = close.length > 0 ? ` Close matches: ${close.join(", ")}.` : "";
-    throw new NotFoundError(`No photos have ${kind} "${value}".${hint}`);
+    throw new NotFoundError(`No photos have ${label} "${value}".${hint}`);
+  }
+
+  resolvePlace(kind: "city" | "state" | "country", ref: string): Promise<string[]> {
+    return this.resolveKnown(kind, kind, ref);
+  }
+
+  /** A tag by id, full path ("Travel/2024") or, when only one tag ends in it, its last part. */
+  async resolveTag(ref: string): Promise<{ id: string; name: string }> {
+    const value = ref.trim();
+    if (!value) throw new InputError("A tag cannot be empty.");
+    const tags = await this.listTags();
+    if (isUuid(value)) {
+      const tag = tags.find((entry) => entry.id === value);
+      return { id: value, name: tag?.value ?? value };
+    }
+    const wanted = fold(value);
+    const several = (candidates: Tag[]) =>
+      new InputError(
+        `"${value}" matches several tags: ${candidates
+          .slice(0, 10)
+          .map((tag) => tag.value)
+          .join(", ")}. Pass the full path.`,
+      );
+    for (const candidates of [
+      tags.filter((tag) => fold(tag.value) === wanted),
+      tags.filter((tag) => fold(tag.name) === wanted),
+      tags.filter((tag) => fold(tag.value).includes(wanted)),
+    ]) {
+      if (candidates.length === 1) return { id: candidates[0].id, name: candidates[0].value };
+      if (candidates.length > 1) throw several(candidates);
+    }
+    throw new NotFoundError(`No tag matches "${value}". Call list_tags to see them.`);
   }
 
   async listAlbums(): Promise<Album[]> {
@@ -190,12 +241,34 @@ export class PhotoLibrary {
     return this.albums.value;
   }
 
-  private async knownPlaces(kind: SuggestionType): Promise<string[]> {
+  async listTags(): Promise<Tag[]> {
     const now = Date.now();
-    const cached = this.places.get(kind);
+    if (!this.tags || this.tags.expires <= now) {
+      let value: Tag[];
+      try {
+        value = await this.client.listTags();
+      } catch (err) {
+        if (err instanceof ImmichMcpError && err.code === "FORBIDDEN") {
+          throw new ImmichMcpError(
+            "FORBIDDEN",
+            "This connection's Immich API key cannot read tags (it lacks tag.read). " +
+              "Tell the user to reconnect the connector and sign in again, which creates a key that can; " +
+              "every other filter works meanwhile.",
+          );
+        }
+        throw err;
+      }
+      this.tags = { value, expires: now + this.cacheTtlMs };
+    }
+    return this.tags.value;
+  }
+
+  private async knownValues(kind: SuggestionType): Promise<string[]> {
+    const now = Date.now();
+    const cached = this.known.get(kind);
     if (cached && cached.expires > now) return cached.value;
     const value = (await this.client.suggestions(kind)).filter(Boolean);
-    this.places.set(kind, { value, expires: now + this.cacheTtlMs });
+    this.known.set(kind, { value, expires: now + this.cacheTtlMs });
     return value;
   }
 
@@ -206,14 +279,30 @@ export class PhotoLibrary {
     const filter: SearchFilter = {};
     const applied: AppliedFilters = {};
 
-    const [people, album, city, state, country] = await Promise.all([
+    if (filters.untagged && filters.tags?.length) {
+      throw new InputError(
+        "untagged cannot be combined with tags: a photo has tags or it has none.",
+      );
+    }
+    if (filters.unrated && filters.minRating !== undefined) {
+      throw new InputError("unrated cannot be combined with minRating.");
+    }
+
+    const { place = {}, camera = {} } = filters;
+    const [people, album, city, state, country, make, model, lens, tags] = await Promise.all([
       filters.people?.length
         ? Promise.all(filters.people.map((ref) => this.resolvePerson(ref)))
         : undefined,
       filters.album ? this.resolveAlbum(filters.album) : undefined,
-      filters.city ? this.resolvePlace("city", filters.city) : undefined,
-      filters.state ? this.resolvePlace("state", filters.state) : undefined,
-      filters.country ? this.resolvePlace("country", filters.country) : undefined,
+      place.city ? this.resolvePlace("city", place.city) : undefined,
+      place.state ? this.resolvePlace("state", place.state) : undefined,
+      place.country ? this.resolvePlace("country", place.country) : undefined,
+      camera.make ? this.resolveKnown("camera-make", "camera make", camera.make) : undefined,
+      camera.model ? this.resolveKnown("camera-model", "camera model", camera.model) : undefined,
+      camera.lens ? this.resolveKnown("camera-lens-model", "lens", camera.lens) : undefined,
+      filters.tags?.length
+        ? Promise.all(filters.tags.map((ref) => this.resolveTag(ref)))
+        : undefined,
     ]);
 
     if (people) {
@@ -245,10 +334,42 @@ export class PhotoLibrary {
       applied.country = country.join(" / ");
     }
 
-    const taken = takenRange(filters.takenFrom, filters.takenTo, this.options.timeZone);
+    const taken = takenRange(filters.taken?.from, filters.taken?.to, this.options.timeZone);
     if (taken) {
       filter.takenAt = taken;
       applied.takenAt = taken;
+    }
+
+    if (make) {
+      filter.make = { in: make };
+      applied.cameraMake = make.join(" / ");
+    }
+    if (model) {
+      filter.model = { in: model };
+      applied.cameraModel = model.join(" / ");
+    }
+    if (lens) {
+      filter.lensModel = { in: lens };
+      applied.lens = lens.join(" / ");
+    }
+
+    if (tags) {
+      const unique = [...new Map(tags.map((tag) => [tag.id, tag])).values()];
+      filter.tagIds = { all: unique.map((tag) => tag.id) };
+      applied.tags = unique;
+    }
+    if (filters.untagged) {
+      filter.hasTags = { eq: false };
+      applied.untagged = true;
+    }
+
+    if (filters.minRating !== undefined) {
+      filter.rating = { gte: filters.minRating };
+      applied.minRating = filters.minRating;
+    }
+    if (filters.unrated) {
+      filter.rating = { eq: null };
+      applied.unrated = true;
     }
 
     const mediaType = filters.mediaType ?? "any";
@@ -451,6 +572,34 @@ export class PhotoLibrary {
         url: `${this.options.publicUrl}/albums/${album.id}`,
       }));
     return { albums: matching, count: matching.length };
+  }
+
+  async findTags(args: { name?: string; limit: number }) {
+    const wanted = args.name?.trim() ? fold(args.name) : undefined;
+    const tags = (await this.listTags())
+      .filter((tag) => !wanted || fold(tag.value).includes(wanted))
+      .sort((a, b) => a.value.localeCompare(b.value))
+      .slice(0, args.limit)
+      .map((tag) => ({ id: tag.id, name: tag.value }));
+    return { tags, count: tags.length };
+  }
+
+  /** The camera values the library has. With `make`, the models are that make's only. */
+  async listCameras(args: { make?: string }) {
+    const make = args.make?.trim()
+      ? await this.resolveKnown("camera-make", "camera make", args.make)
+      : undefined;
+    const [makes, models, lenses] = await Promise.all([
+      make ? Promise.resolve(make) : this.knownValues("camera-make"),
+      make
+        ? Promise.all(
+            make.map((entry) => this.client.suggestions("camera-model", { make: entry })),
+          ).then((lists) => [...new Set(lists.flat().filter(Boolean))])
+        : this.knownValues("camera-model"),
+      this.knownValues("camera-lens-model"),
+    ]);
+    const sorted = (values: string[]) => [...values].sort((a, b) => a.localeCompare(b));
+    return { makes: sorted(makes), models: sorted(models), lenses: sorted(lenses) };
   }
 
   // ----- shaping ------------------------------------------------------------

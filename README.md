@@ -8,22 +8,27 @@ workflows rather than raw endpoints:
 | --- | --- | --- |
 | `search_photos` | **context** — what the photo shows (CLIP smart search) | "sunrise on the beach" |
 | `search_photo_text` | **text in the image** (OCR) | "check out receipt", "wifi password" |
-| `search_photo_metadata` | file name, description, people, place, date, album | "videos of Ada in Mexico, 2024" |
+| `search_photo_metadata` | file name, description, people, place, date, camera, album, tags, rating | "videos of Ada in Mexico, 2024", "my 5-star photos" |
 | `get_photo` | one photo's details and full OCR text | |
 | `view_photo` | the image itself, returned as MCP image content | |
-| `list_people` / `list_albums` | the names the filters accept | |
+| `list_people` / `list_albums` / `list_tags` / `list_cameras` | the names the filters accept | |
 
 It is **read-only**: no tool uploads, edits, moves or deletes anything, and every tool is annotated
 `readOnlyHint`.
 
 ## Why it is more than an API wrapper
 
-- **Filters take plain names.** `people: ["jose"]` finds "José Núñez"; `city: "zurich"` is
-  resolved to the "Zürich" Immich stored (its place filter is exact and case-sensitive); an album
-  can be given by name. Ambiguous or unknown names fail with the candidates, so the model can
-  correct itself. Each result reports what the names resolved to under `applied`.
-- **Dates are calendar periods in your zone.** `takenFrom: "2024-06", takenTo: "2024-06"` is all of
-  June 2024 as lived in `TZ`, DST included. Timestamps keep their offset.
+- **Filters take plain names.** `people: ["jose"]` finds "José Núñez"; `place: {city: "zurich"}`
+  is resolved to the "Zürich" Immich stored (its place and camera filters are exact and
+  case-sensitive); albums and tags can be given by name. Ambiguous or unknown names fail with the
+  candidates, so the model can correct itself. Each result reports what the names resolved to
+  under `applied`.
+- **The same filters on every search**, grouped like Immich's own filter panel:
+  `people`, `place {city, state, country}`, `taken {from, to}`, `camera {make, model, lens}`,
+  `album`, `tags` / `untagged`, `minRating` / `unrated`, `mediaType`, `favoritesOnly`,
+  `includeArchived`. An argument a tool does not have is refused, never silently ignored.
+- **Dates are calendar periods in your zone.** `taken: {from: "2024-06", to: "2024-06"}` is all
+  of June 2024 as lived in `TZ`, DST included. Timestamps keep their offset.
 - **OCR results say why they matched**: each hit carries the matching lines of text.
 - **Compact results**: about ten fields per photo instead of Immich's ~40, plus a link to open it
   in Immich. Live Photo video halves, hidden and locked items are excluded; archived on request.
@@ -34,7 +39,8 @@ It is **read-only**: no tool uploads, edits, moves or deletes anything, and ever
 - Immich **v3.2 or newer** (it uses the `filter` search API introduced in 3.2; tested on 3.4.2),
   with Smart Search and OCR enabled for the context and text searches.
 - An API key (Account Settings → API Keys) with at least `asset.read`, `asset.view`,
-  `person.read` and `album.read`.
+  `person.read` and `album.read`, plus `tag.read` for the tag filters and `list_tags`. Keys made
+  by signing in get all five.
 
 ## Run it
 

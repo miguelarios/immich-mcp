@@ -148,9 +148,15 @@ export interface SearchFilter {
   type?: { eq?: AssetType; in?: AssetType[] };
   visibility?: { in: AssetVisibility[] };
   isFavorite?: { eq: boolean };
+  hasTags?: { eq: boolean };
   city?: { in: string[] };
   state?: { in: string[] };
   country?: { in: string[] };
+  make?: { in: string[] };
+  model?: { in: string[] };
+  lensModel?: { in: string[] };
+  /** `eq: null` means unrated. */
+  rating?: { eq?: number | null; gte?: number };
   ocr?: { matches: string };
   description?: { like: string };
   originalFileName?: { like: string };
@@ -184,4 +190,12 @@ export interface ApiKeyInfo {
   id: string;
   name: string;
   permissions: string[];
+}
+
+/** `GET /tags`. `value` is the full path ("Travel/2024"); `name` is its last part. */
+export interface Tag {
+  id: string;
+  name: string;
+  value: string;
+  parentId?: string | null;
 }
